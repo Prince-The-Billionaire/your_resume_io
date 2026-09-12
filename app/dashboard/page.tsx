@@ -1,11 +1,28 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Send, Mic, MicOff, Sparkles, User, Download, Keyboard, 
-  Home, Search, Shield, MapPin, Settings 
+import { Cormorant_Garamond } from 'next/font/google';
+import { motion, AnimatePresence, useMotionValue, useSpring, useTransform } from 'framer-motion';
+import {
+  Send,
+  Mic,
+  MicOff,
+  Sparkles,
+  User,
+  Download,
+  Keyboard,
+  Home,
+  FileText,
+  Settings,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
+
+const cormorant = Cormorant_Garamond({
+  weight: ['300', '400', '500', '600', '700'],
+  subsets: ['latin'],
+  style: ['normal', 'italic'],
+});
 
 interface InterviewState {
   current_step: string;
@@ -24,34 +41,190 @@ declare global {
   interface Window {
     SpeechRecognition: any;
     webkitSpeechRecognition: any;
+    AudioContext: any;
+    webkitAudioContext: any;
   }
 }
 
+// ================= WEB AUDIO API SYNTHESIZERS =================
+const playTuningForkSound = (audioCtx: AudioContext | null) => {
+  if (!audioCtx) return;
+  try {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, audioCtx.currentTime); // A5 note
+
+    gain.gain.setValueAtTime(0.18, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 1.4);
+
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 1.4);
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+const startBetterLoFiFocus = (audioCtx: AudioContext) => {
+  const now = audioCtx.currentTime;
+  const master = audioCtx.createGain();
+  master.gain.setValueAtTime(0, now);
+  master.gain.linearRampToValueAtTime(0.065, now + 3);
+
+  // Warm pad frequencies (F#m9 + extensions, slightly stretched)
+  const freqs = [92.5, 138.6, 185, 220, 277.2, 330, 370, 415.3];
+
+  const oscs: OscillatorNode[] = [];
+  const filters: BiquadFilterNode[] = [];
+
+  freqs.forEach((f, i) => {
+    const osc = audioCtx.createOscillator();
+    const filter = audioCtx.createBiquadFilter();
+    const g = audioCtx.createGain();
+
+    osc.type = i < 3 ? "sine" : "triangle";
+    osc.frequency.value = f;
+    osc.detune.value = (Math.random() - 0.5) * 12; // organic drift
+
+    filter.type = "lowpass";
+    filter.frequency.value = 320 + i * 25;
+    filter.Q.value = 0.8;
+
+    g.gain.value = 0.011 + i * 0.0012;
+
+    osc.connect(filter);
+    filter.connect(g);
+    g.connect(master);
+
+    osc.start();
+    oscs.push(osc);
+    filters.push(filter);
+  });
+
+  // Slow filter + volume breathing
+  const lfo = audioCtx.createOscillator();
+  const lfoDepth = audioCtx.createGain();
+  lfo.frequency.value = 0.06;
+  lfoDepth.gain.value = 55;
+
+  lfo.connect(lfoDepth);
+  filters.forEach((f) => lfoDepth.connect(f.frequency));
+  lfo.start();
+
+  // Soft noise bed (very gentle rain texture)
+  const noiseBuf = audioCtx.createBuffer(1, audioCtx.sampleRate * 3, audioCtx.sampleRate);
+  const nd = noiseBuf.getChannelData(0);
+  for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+
+  const noiseSrc = audioCtx.createBufferSource();
+  noiseSrc.buffer = noiseBuf;
+  noiseSrc.loop = true;
+
+  const nFilter = audioCtx.createBiquadFilter();
+  nFilter.type = "lowpass";
+  nFilter.frequency.value = 1400;
+  nFilter.Q.value = 0.5;
+
+  const nGain = audioCtx.createGain();
+  nGain.gain.value = 0.007;
+
+  noiseSrc.connect(nFilter);
+  nFilter.connect(nGain);
+  nGain.connect(master);
+  noiseSrc.start();
+
+  // Soft sub pulse every ~3.2 seconds
+  const sub = audioCtx.createOscillator();
+  const subG = audioCtx.createGain();
+  sub.type = "sine";
+  sub.frequency.value = 46;
+  subG.gain.value = 0;
+
+  sub.connect(subG);
+  subG.connect(master);
+  sub.start();
+
+  const pulse = (t: number) => {
+    subG.gain.setValueAtTime(0, t);
+    subG.gain.linearRampToValueAtTime(0.028, t + 0.12);
+    subG.gain.exponentialRampToValueAtTime(0.0001, t + 1.4);
+  };
+
+  // Schedule pulses
+  let nextPulse = now + 2;
+  const schedule = () => {
+    pulse(nextPulse);
+    nextPulse += 3.15 + Math.random() * 0.3;
+    setTimeout(schedule, 2800);
+  };
+  schedule();
+
+  master.connect(audioCtx.destination);
+
+  return {
+    stop: () => {
+      const t = audioCtx.currentTime;
+      master.gain.setValueAtTime(master.gain.value, t);
+      master.gain.exponentialRampToValueAtTime(0.00001, t + 2.5);
+      setTimeout(() => {
+        oscs.forEach((o) => o.stop());
+        noiseSrc.stop();
+        sub.stop();
+        lfo.stop();
+      }, 2600);
+    },
+    masterGain: master,
+  };
+};
+
 export default function App() {
+  const [hasEntered, setHasEntered] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
       id: 'welcome-1',
       role: 'ai',
-      content: "Hi there! I'm your AI career coach. Let's build a Harvard-standard resume. To get started, what is your full name?",
-    }
+      content:
+        "Hi there! I'm your AI career coach. Let's build a Harvard-standard resume. To get started, what is your full name?",
+    },
   ]);
-  
+
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [pdfBase64, setPdfBase64] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
-  
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const ambientSoundRef = useRef<{ stop: () => void; masterGain: GainNode } | null>(null);
 
   const [interviewState, setInterviewState] = useState<InterviewState>({
-    current_step: "GREETING_NAME",
+    current_step: 'GREETING_NAME',
     probing_count: 0,
     resume_data: {},
-    transcript: []
+    transcript: [],
   });
 
-  const requiresTyping = ['CONTACT_INFO', 'PROJECTS_GITHUB'].includes(interviewState.current_step);
+  const requiresTyping = ['CONTACT_INFO', 'PROJECTS_GITHUB'].includes(
+    interviewState.current_step
+  );
+
+  // Parallax Setup
+  const mouseX = useMotionValue(0);
+  const mouseY = useMotionValue(0);
+  const smoothX = useSpring(mouseX, { stiffness: 35, damping: 25 });
+  const smoothY = useSpring(mouseY, { stiffness: 35, damping: 25 });
+  const bgX = useTransform(smoothX, [-0.5, 0.5], ['15px', '-15px']);
+  const bgY = useTransform(smoothY, [-0.5, 0.5], ['15px', '-15px']);
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const { innerWidth, innerHeight } = window;
+    mouseX.set(e.clientX / innerWidth - 0.5);
+    mouseY.set(e.clientY / innerHeight - 0.5);
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -59,7 +232,8 @@ export default function App() {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
       if (SpeechRecognition) {
         recognitionRef.current = new SpeechRecognition();
         recognitionRef.current.continuous = false;
@@ -74,7 +248,7 @@ export default function App() {
         };
 
         recognitionRef.current.onerror = (event: any) => {
-          console.error("Speech recognition error", event.error);
+          console.error('Speech recognition error', event.error);
           setIsListening(false);
         };
 
@@ -85,7 +259,45 @@ export default function App() {
     }
   }, []);
 
+  const handleEnterExperience = () => {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioContextClass();
+    audioCtxRef.current = ctx;
+
+    if (ctx.state === 'suspended') {
+      ctx.resume();
+    }
+
+    ambientSoundRef.current = startBetterLoFiFocus(ctx);
+    playTuningForkSound(ctx);
+    setHasEntered(true);
+  };
+
+  const toggleMute = () => {
+    if (!ambientSoundRef.current || !audioCtxRef.current) return;
+    if (isMuted) {
+      ambientSoundRef.current.masterGain.gain.setValueAtTime(
+        0.065,
+        audioCtxRef.current.currentTime
+      );
+      setIsMuted(false);
+    } else {
+      ambientSoundRef.current.masterGain.gain.setValueAtTime(
+        0.0,
+        audioCtxRef.current.currentTime
+      );
+      setIsMuted(true);
+    }
+  };
+
+  const triggerAudioFeedback = () => {
+    if (audioCtxRef.current) {
+      playTuningForkSound(audioCtxRef.current);
+    }
+  };
+
   const toggleListening = () => {
+    triggerAudioFeedback();
     if (isListening) {
       recognitionRef.current?.stop();
       setIsListening(false);
@@ -101,29 +313,40 @@ export default function App() {
     const textToSend = inputValue.trim();
     if (!textToSend || isLoading) return;
 
+    triggerAudioFeedback();
+
     if (isListening) {
       recognitionRef.current?.stop();
       setIsListening(false);
     }
 
     setInputValue('');
-    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: textToSend }]);
+    setMessages((prev) => [
+      ...prev,
+      { id: Date.now().toString(), role: 'user', content: textToSend },
+    ]);
     setIsLoading(true);
 
     try {
-      const res = await fetch('https://YOUR_MODAL_WORKSPACE--ats-resume-desktop-backend-fastapi-app-dev.modal.run/interview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state: interviewState, user_input: textToSend }),
-      });
+      const res = await fetch(
+        'https://danielprincewill14--ats-resume-desktop-backend-interview-6a8fe2.modal.run',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ state: interviewState, user_input: textToSend }),
+        }
+      );
 
-      // Front-end graceful degradation for Gemini API overload
       if (res.status === 503) {
-        setMessages(prev => [...prev, { 
-          id: Date.now().toString(), 
-          role: 'ai', 
-          content: "The network is a bit crowded right now. Could you repeat that last bit?" 
-        }]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            role: 'ai',
+            content:
+              'The network is a bit crowded right now. Could you repeat that last bit?',
+          },
+        ]);
         setIsLoading(false);
         return;
       }
@@ -132,20 +355,27 @@ export default function App() {
         const errData = await res.json();
         throw new Error(errData.detail || 'Failed to fetch from interview endpoint');
       }
-      
+
       const data = await res.json();
       setInterviewState(data.state);
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'ai', content: data.ai_message }]);
+      setMessages((prev) => [
+        ...prev,
+        { id: Date.now().toString(), role: 'ai', content: data.ai_message },
+      ]);
 
       if (data.is_complete && data.generated_resume) {
         await handleRenderPdf(data.generated_resume);
       }
     } catch (error: any) {
-      console.error("Chat error:", error);
-      setMessages(prev => [...prev, { 
-        id: Date.now().toString(), role: 'ai', 
-        content: `I ran into an issue: ${error.message}. Could you try again?` 
-      }]);
+      console.error('Chat error:', error);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          role: 'ai',
+          content: `I ran into an issue: ${error.message}. Could you try again?`,
+        },
+      ]);
     } finally {
       setIsLoading(false);
     }
@@ -153,236 +383,396 @@ export default function App() {
 
   const handleRenderPdf = async (structuredJson: any) => {
     try {
-      setMessages(prev => [...prev, { id: 'rendering-msg', role: 'ai', content: "Drafting your perfectly formatted PDF now. Hang tight..." }]);
-      
-      const res = await fetch('https://YOUR_MODAL_WORKSPACE--ats-resume-desktop-backend-fastapi-app-dev.modal.run/render', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ structured_json: structuredJson }),
-      });
-      
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: 'rendering-msg',
+          role: 'ai',
+          content: 'Drafting your perfectly formatted PDF now. Hang tight...',
+        },
+      ]);
+
+      const res = await fetch(
+        'https://danielprincewill14--ats-resume-desktop-backend-render-pd-948bdd.modal.run',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ structured_json: structuredJson }),
+        }
+      );
+
       if (!res.ok) throw new Error('Failed to render PDF');
       const data = await res.json();
       setPdfBase64(data.pdf_base64);
-      setMessages(prev => [...prev, { id: 'done-msg', role: 'ai', content: "All done! Take a look at your new resume on the right." }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: 'done-msg',
+          role: 'ai',
+          content: 'All done! Take a look at your new resume on the right.',
+        },
+      ]);
     } catch (error) {
-      console.error("PDF Render Error:", error);
+      console.error('PDF Render Error:', error);
     }
   };
 
   const downloadPdf = () => {
+    triggerAudioFeedback();
     if (!pdfBase64) return;
     const link = document.createElement('a');
     link.href = `data:application/pdf;base64,${pdfBase64}`;
-    link.download = `${interviewState.resume_data?.personal_info?.name || 'Harvard'}_Resume.pdf`;
+    link.download = `${
+      interviewState.resume_data?.personal_info?.name || 'Harvard'
+    }_Resume.pdf`;
     link.click();
   };
 
   return (
-    <div className="flex h-screen w-full relative overflow-hidden font-sans text-slate-100 bg-[#161618] items-center">
-      
-      {/* Aesthetic Mesh Background with Subtle Purple Accent */}
-      <div className="absolute inset-0 z-0 overflow-hidden opacity-80 pointer-events-none">
-        <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-[#b49072]/20 blur-[130px] rounded-full mix-blend-screen" />
-        <div className="absolute bottom-[-20%] right-[-10%] w-[60%] h-[60%] bg-[#9333ea]/15 blur-[160px] rounded-full mix-blend-screen" /> {/* Purple Accent */}
-        <div className="absolute top-[30%] right-[20%] w-[40%] h-[40%] bg-[#d2c4b4]/10 blur-[120px] rounded-full mix-blend-screen" />
-        <div className="absolute inset-0 bg-black/30 backdrop-blur-[60px]" />
-      </div>
-
-      {/* Floating Centered Sidebar */}
-      <motion.aside 
-        initial={{ opacity: 0, x: -50 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ duration: 0.8, ease: "easeOut", delay: 0.2 }}
-        className="absolute z-20 left-[5px] top-1/2 -translate-y-1/2 h-[60%] w-20 md:w-24 flex flex-col items-center py-8 bg-white/5 backdrop-blur-2xl border border-white/10 shadow-2xl rounded-[40px]"
-      >
-        <div className="flex flex-col items-center gap-6 mb-8 w-full">
-          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-white/20 to-purple-500/20 flex items-center justify-center text-white shadow-lg border border-white/20">
-            <Sparkles className="w-5 h-5 text-purple-200" />
-          </div>
-          <span className="text-[11px] font-medium text-white/60 tracking-[0.2em] -rotate-90 mt-14 mb-4 whitespace-nowrap">
-            yourresume.io
-          </span>
-        </div>
-        
-        <nav className="flex flex-col gap-6 mt-auto mb-auto">
-          <button className="p-3 rounded-2xl bg-white/10 text-purple-200 shadow-inner border border-white/10"><Home className="w-5 h-5" /></button>
-          <button className="p-3 rounded-2xl text-white/40 hover:text-white hover:bg-white/10 transition-all"><Search className="w-5 h-5" /></button>
-          <button className="p-3 rounded-2xl text-white/40 hover:text-white hover:bg-white/10 transition-all"><Settings className="w-5 h-5" /></button>
-        </nav>
-        
-        <div className="mt-auto">
-          <button className="p-3 rounded-2xl text-white/40 hover:text-white hover:bg-white/10 transition-all"><User className="w-5 h-5" /></button>
-        </div>
-      </motion.aside>
-
-      {/* Main Content Area */}
-      <main className="relative z-10 flex-1 flex p-4 pl-[100px] md:pl-[120px] md:pr-8 md:py-8 gap-6 h-[95vh] overflow-hidden">
-        
-        {/* Chat Interface with Fold-in Micro Animation */}
-        <motion.div 
-          initial={{ opacity: 0, rotateX: 15, y: 30, scale: 0.95 }}
-          animate={{ opacity: 1, rotateX: 0, y: 0, scale: 1 }}
-          transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
-          className={`flex flex-col h-full bg-white/5 backdrop-blur-3xl border border-white/10 shadow-[0_8px_32px_0_rgba(0,0,0,0.37)] rounded-[32px] overflow-hidden transition-all duration-500 ease-in-out ${
-            pdfBase64 ? 'w-full md:w-[45%]' : 'w-full max-w-4xl mx-auto'
-          }`}
-          style={{ transformPerspective: 1000 }}
-        >
-          {/* Header */}
-          <div className="px-8 py-6 border-b border-white/5 bg-gradient-to-r from-white/5 to-transparent flex items-center justify-between">
-            <div>
-              <h1 className="font-semibold text-lg text-white tracking-wide">Interview Session</h1>
-              <p className="text-xs text-purple-300/70 uppercase tracking-widest mt-1">AI Agent Active</p>
-            </div>
-            <span className="px-4 py-1.5 text-xs font-medium bg-purple-500/10 text-purple-200 rounded-full border border-purple-500/20 backdrop-blur-md">
-              {interviewState.current_step.replace('_', ' ')}
-            </span>
-          </div>
-
-          {/* Messages Area */}
-          <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-6 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-            <AnimatePresence initial={false}>
-              {messages.map((msg) => (
-                <motion.div
-                  key={msg.id}
-                  initial={{ opacity: 0, y: 15, scale: 0.98 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  className={`flex gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}
+    <div className="relative min-h-screen w-full bg-[#030304] text-white overflow-hidden selection:bg-purple-500/30">
+      {/* ================= STAGE AUDIO ENTRY MODAL ================= */}
+      <AnimatePresence>
+        {!hasEntered && (
+          <motion.div
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0, transition: { duration: 0.8, ease: 'easeInOut' } }}
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#030304] text-white px-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.8 }}
+              className="flex flex-col items-center gap-6 text-center max-w-sm"
+            >
+              <div className="p-4 rounded-full bg-white/[0.03] border border-white/10 shadow-[0_0_30px_rgba(255,255,255,0.05)]">
+                <Volume2 className="w-6 h-6 text-slate-300 stroke-[1.5]" />
+              </div>
+              <div>
+                <h3
+                  className={`${cormorant.className} text-3xl font-normal text-slate-100 tracking-wide`}
                 >
-                  <div className={`w-10 h-10 rounded-2xl flex-shrink-0 flex items-center justify-center shadow-lg border ${
-                    msg.role === 'user' ? 'bg-purple-500/20 border-purple-500/30 text-purple-100' : 'bg-black/40 border-white/10 text-white/90'
-                  }`}>
-                    {msg.role === 'user' ? <User className="w-5 h-5" /> : <Sparkles className="w-5 h-5" />}
-                  </div>
+                  YourResume.io
+                </h3>
+                <p className="text-xs text-slate-400 mt-2 tracking-widest uppercase">
+                  Continuous Lo-Fi Focus Sound Active
+                </p>
+              </div>
 
-                  <div className={`max-w-[80%] leading-relaxed text-[15px] p-5 shadow-xl backdrop-blur-md ${
-                    msg.role === 'user' 
-                      ? 'bg-purple-500/10 text-white rounded-3xl rounded-tr-sm border border-purple-500/20' 
-                      : 'bg-black/20 text-white/90 rounded-3xl rounded-tl-sm border border-white/5'
-                  }`}>
-                    {msg.content}
-                  </div>
-                </motion.div>
-              ))}
-            </AnimatePresence>
-
-            {isLoading && (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-4">
-                <div className="w-10 h-10 rounded-2xl bg-black/40 border border-white/10 flex items-center justify-center text-white/90">
-                  <Sparkles className="w-5 h-5" />
-                </div>
-                <div className="bg-black/20 border border-white/5 shadow-xl backdrop-blur-md rounded-3xl rounded-tl-sm p-5 flex items-center gap-2">
-                  <motion.div className="w-2 h-2 bg-purple-400/50 rounded-full" animate={{ y: [0, -5, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0 }} />
-                  <motion.div className="w-2 h-2 bg-purple-400/50 rounded-full" animate={{ y: [0, -5, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0.2 }} />
-                  <motion.div className="w-2 h-2 bg-purple-400/50 rounded-full" animate={{ y: [0, -5, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0.4 }} />
-                </div>
-              </motion.div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-
-          {/* Input Area */}
-          <div className="p-6 bg-black/10 border-t border-white/5 backdrop-blur-xl rounded-b-[32px]">
-            {requiresTyping ? (
-              <motion.form 
-                initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
-                onSubmit={handleSendMessage}
-                className="flex flex-col gap-3"
+              <button
+                onClick={handleEnterExperience}
+                className="mt-2 px-8 py-3 rounded-full bg-white text-black font-medium text-sm tracking-wide hover:bg-slate-200 transition-all duration-300 shadow-[0_0_25px_rgba(255,255,255,0.2)] hover:scale-105 active:scale-95"
               >
-                <div className="flex items-center text-[10px] font-semibold text-purple-300/60 uppercase tracking-wider">
-                  <Keyboard className="w-3 h-3 mr-2" /> Keyboard Input Required
-                </div>
-                <div className="flex items-center bg-black/30 border border-white/10 rounded-2xl pl-5 pr-2 py-2 focus-within:ring-1 focus-within:ring-purple-500/50 focus-within:border-purple-500/50 transition-all shadow-inner">
-                  <input
-                    type="text"
-                    value={inputValue}
-                    onChange={(e) => setInputValue(e.target.value)}
-                    placeholder={interviewState.current_step === 'CONTACT_INFO' ? "Enter Email and Phone Number..." : "Enter GitHub Link..."}
-                    disabled={isLoading || !!pdfBase64}
-                    className="flex-1 bg-transparent border-none focus:outline-none text-[15px] text-white placeholder:text-white/30 disabled:opacity-50"
-                  />
-                  <button
-                    type="submit"
-                    disabled={!inputValue.trim() || isLoading || !!pdfBase64}
-                    className="w-12 h-12 rounded-xl bg-purple-500/20 hover:bg-purple-500/30 text-purple-100 flex items-center justify-center disabled:opacity-50 transition-all ml-2 backdrop-blur-md"
-                  >
-                    <Send className="w-5 h-5 ml-0.5" />
-                  </button>
-                </div>
-              </motion.form>
-            ) : (
-              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center justify-center gap-4">
-                
-                {/* Editable Voice Input Field */}
-                {(inputValue || isListening) && (
-                   <div className="w-full flex items-center bg-black/30 backdrop-blur-md border border-white/10 rounded-2xl p-2 shadow-inner focus-within:border-purple-500/30 transition-all">
-                     <textarea
-                       value={inputValue}
-                       onChange={(e) => setInputValue(e.target.value)}
-                       placeholder={isListening ? "Listening..." : "Edit your text here..."}
-                       className="flex-1 bg-transparent border-none focus:ring-0 outline-none text-white p-3 resize-none placeholder:text-white/30"
-                       rows={2}
-                     />
-                     {!isListening && inputValue && (
-                        <button onClick={(e) => handleSendMessage(e)} className="p-4 bg-purple-500/20 text-purple-100 rounded-xl hover:bg-purple-500/30 transition-all self-end border border-purple-500/10">
-                          <Send className="w-5 h-5" />
-                        </button>
-                     )}
-                   </div>
-                )}
-                
-                <button
-                  onClick={toggleListening}
-                  disabled={isLoading || !!pdfBase64}
-                  className={`relative flex items-center justify-center w-20 h-20 rounded-full transition-all duration-500 shadow-2xl ${
-                    isListening ? 'bg-red-500/80 text-white shadow-[0_0_40px_rgba(239,68,68,0.3)] scale-110' : 'bg-white/5 border border-white/10 text-white hover:bg-purple-500/10 hover:border-purple-500/30 hover:scale-105'
-                  } disabled:opacity-50 disabled:hover:scale-100 backdrop-blur-md`}
-                >
-                  {isListening && (
-                    <motion.div 
-                      className="absolute inset-0 rounded-full border border-red-400/50"
-                      animate={{ scale: [1, 1.5, 1], opacity: [0.8, 0, 0.8] }}
-                      transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-                    />
-                  )}
-                  {isListening ? <MicOff className="w-7 h-7 z-10" /> : <Mic className="w-7 h-7 z-10" />}
-                </button>
-              </motion.div>
-            )}
-          </div>
+                Begin Interview Session
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ================= BACKGROUND IMAGE PARALLAX ================= */}
+      <div onMouseMove={handleMouseMove} className="relative min-h-screen w-full flex flex-col justify-between">
+        <motion.div
+          style={{ x: bgX, y: bgY, scale: 1.05 }}
+          className="absolute inset-0 pointer-events-none z-0 flex items-center justify-center"
+        >
+          <img
+            src="/dashboard.jpeg"
+            alt="Background Environment"
+            className="w-full h-full object-cover object-center opacity-85"
+          />
+          <div className="absolute inset-0 bg-radial-gradient from-transparent via-[#030304]/40 to-[#030304]/95" />
         </motion.div>
 
-        {/* PDF PREVIEW PANEL */}
-        <AnimatePresence>
-          {pdfBase64 && (
-            <motion.div 
-              initial={{ opacity: 0, x: 50, scale: 0.95 }}
-              animate={{ opacity: 1, x: 0, scale: 1 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200, delay: 0.1 }}
-              className="hidden md:flex flex-1 flex-col h-full relative"
-            >
-              <div className="absolute top-6 right-6 z-20">
-                <button 
-                  onClick={downloadPdf}
-                  className="flex items-center gap-2 bg-black/40 hover:bg-purple-500/20 backdrop-blur-xl border border-white/10 hover:border-purple-500/30 text-white px-6 py-3 rounded-2xl font-medium text-sm shadow-2xl transition-all active:scale-95"
-                >
-                  <Download className="w-4 h-4" />
-                  Download PDF
-                </button>
+        {/* ================= TOP NAVBAR / LOGO ================= */}
+        <header className="relative z-20 w-full px-8 md:px-16 pt-8 pb-4 flex items-center justify-between">
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={hasEntered ? { opacity: 1, y: 0 } : {}}
+            className={`${cormorant.className} text-3xl md:text-4xl tracking-tight font-normal text-slate-100`}
+          >
+            YourResume.io
+          </motion.div>
+
+          {/* Sound Mute Toggle */}
+          <button
+            onClick={toggleMute}
+            className="p-3 rounded-full bg-black/30 border border-white/10 backdrop-blur-xl hover:bg-white/10 transition-colors text-slate-300"
+          >
+            {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+          </button>
+        </header>
+
+        {/* ================= MAIN CONTENT DISPLAY ================= */}
+        <main className="relative z-10 w-full max-w-[1600px] mx-auto px-6 md:px-12 my-auto py-6 flex flex-col md:flex-row gap-8 items-center justify-center min-h-[82vh]">
+          
+          {/* GLASS INTERVIEW MODAL WITH EXTERNAL WIREFRAME LINE */}
+          <motion.div
+            initial={{ opacity: 0, y: 30, scale: 0.96 }}
+            animate={hasEntered ? { opacity: 1, y: 0, scale: 1 } : {}}
+            transition={{ duration: 0.9, ease: [0.16, 1, 0.3, 1] }}
+            className={`w-full transition-all duration-700 ease-in-out ${
+              pdfBase64 ? 'md:w-[50%]' : 'max-w-3xl mx-auto'
+            }`}
+          >
+            {/* Outer Thin Line Wireframe Frame */}
+            <div className="p-1 sm:p-1.5 rounded-[32px] border border-white/20 bg-white/[0.02] backdrop-blur-3xl shadow-[0_20px_50px_rgba(0,0,0,0.6)]">
+              {/* Inner Glass Box */}
+              <div className="relative rounded-[28px] border border-white/30 bg-black/30 backdrop-blur-2xl overflow-hidden flex flex-col h-[520px] md:h-[580px] shadow-inner">
+                
+                {/* Modal Header */}
+                <div className="px-8 py-6 border-b border-white/10 bg-white/[0.02] flex items-center justify-between">
+                  <div>
+                    <h2
+                      className={`${cormorant.className} text-3xl sm:text-4xl font-normal text-slate-100 tracking-wide`}
+                    >
+                      Interview Session
+                    </h2>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
+                      <span className="text-[11px] font-medium text-slate-300 tracking-widest uppercase">
+                        AI Agent Active
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Step Pill Badge */}
+                  <div className="px-4 py-1.5 rounded-full bg-white/[0.06] border border-white/20 backdrop-blur-md text-xs font-light text-slate-200 tracking-wider">
+                    {interviewState.current_step.replace('_', ' ')}
+                  </div>
+                </div>
+
+                {/* Messages Feed Area */}
+                <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-6 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+                  <AnimatePresence initial={false}>
+                    {messages.map((msg) => (
+                      <motion.div
+                        key={msg.id}
+                        initial={{ opacity: 0, y: 15 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className={`flex gap-4 ${
+                          msg.role === 'user' ? 'flex-row-reverse' : ''
+                        }`}
+                      >
+                        <div
+                          className={`w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center border shadow-lg ${
+                            msg.role === 'user'
+                              ? 'bg-purple-500/20 border-purple-400/40 text-purple-100'
+                              : 'bg-white/10 border-white/20 text-white'
+                          }`}
+                        >
+                          {msg.role === 'user' ? (
+                            <User className="w-4 h-4" />
+                          ) : (
+                            <Sparkles className="w-4 h-4 text-purple-200" />
+                          )}
+                        </div>
+
+                        <div
+                          className={`max-w-[80%] text-sm sm:text-base font-light leading-relaxed p-4 px-5 rounded-2xl backdrop-blur-md ${
+                            msg.role === 'user'
+                              ? 'bg-purple-900/30 text-slate-100 rounded-tr-none border border-purple-400/20'
+                              : 'bg-white/[0.06] text-slate-200 rounded-tl-none border border-white/10'
+                          }`}
+                        >
+                          {msg.content}
+                        </div>
+                      </motion.div>
+                    ))}
+                  </AnimatePresence>
+
+                  {isLoading && (
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="flex gap-4"
+                    >
+                      <div className="w-9 h-9 rounded-full bg-white/10 border border-white/20 flex items-center justify-center">
+                        <Sparkles className="w-4 h-4 text-purple-200" />
+                      </div>
+                      <div className="bg-white/[0.06] border border-white/10 rounded-2xl rounded-tl-none p-4 px-6 flex items-center gap-2">
+                        <motion.div
+                          className="w-1.5 h-1.5 bg-slate-300 rounded-full"
+                          animate={{ y: [0, -4, 0] }}
+                          transition={{ duration: 0.6, repeat: Infinity, delay: 0 }}
+                        />
+                        <motion.div
+                          className="w-1.5 h-1.5 bg-slate-300 rounded-full"
+                          animate={{ y: [0, -4, 0] }}
+                          transition={{ duration: 0.6, repeat: Infinity, delay: 0.2 }}
+                        />
+                        <motion.div
+                          className="w-1.5 h-1.5 bg-slate-300 rounded-full"
+                          animate={{ y: [0, -4, 0] }}
+                          transition={{ duration: 0.6, repeat: Infinity, delay: 0.4 }}
+                        />
+                      </div>
+                    </motion.div>
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
+
+                {/* Bottom Input Area */}
+                <div className="p-6 border-t border-white/10 bg-black/20 backdrop-blur-xl relative">
+                  {requiresTyping ? (
+                    <form onSubmit={handleSendMessage} className="flex flex-col gap-2">
+                      <div className="flex items-center text-[10px] uppercase font-medium text-slate-400 tracking-widest">
+                        <Keyboard className="w-3 h-3 mr-2 text-purple-300" /> Keyboard Input Required
+                      </div>
+                      <div className="flex items-center bg-white/[0.05] border border-white/20 rounded-full pl-5 pr-2 py-1.5">
+                        <input
+                          type="text"
+                          value={inputValue}
+                          onChange={(e) => setInputValue(e.target.value)}
+                          placeholder={
+                            interviewState.current_step === 'CONTACT_INFO'
+                              ? 'Enter Email and Phone Number...'
+                              : 'Enter GitHub Link...'
+                          }
+                          disabled={isLoading || !!pdfBase64}
+                          className="flex-1 bg-transparent text-sm text-white focus:outline-none placeholder:text-slate-400"
+                        />
+                        <button
+                          type="submit"
+                          onMouseEnter={triggerAudioFeedback}
+                          disabled={!inputValue.trim() || isLoading}
+                          className="p-3 rounded-full bg-white/10 text-white hover:bg-white/20 transition-all disabled:opacity-40"
+                        >
+                          <Send className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center">
+                      {(inputValue || isListening) && (
+                        <div className="w-full mb-3 flex items-center bg-white/[0.05] border border-white/20 rounded-2xl p-2">
+                          <textarea
+                            value={inputValue}
+                            onChange={(e) => setInputValue(e.target.value)}
+                            placeholder={isListening ? 'Listening...' : 'Edit response...'}
+                            className="flex-1 bg-transparent text-sm text-white focus:outline-none p-2 resize-none placeholder:text-slate-400"
+                            rows={2}
+                          />
+                          {!isListening && inputValue && (
+                            <button
+                              onClick={(e) => handleSendMessage(e)}
+                              className="p-3 bg-white/10 text-white rounded-xl hover:bg-white/20 transition-all"
+                            >
+                              <Send className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {/* CENTER ORB MICROPHONE BUTTON WITH EXTERNAL RING */}
+                      <div className="relative group p-1.5 rounded-full border border-white/20 bg-white/[0.02] backdrop-blur-md">
+                        <button
+                          onClick={toggleListening}
+                          onMouseEnter={triggerAudioFeedback}
+                          disabled={isLoading || !!pdfBase64}
+                          aria-label="Toggle Microphone"
+                          className={`relative flex items-center justify-center w-16 h-16 rounded-full border transition-all duration-300 shadow-[0_0_25px_rgba(192,132,252,0.2)] ${
+                            isListening
+                              ? 'bg-red-500/80 border-red-300 text-white shadow-[0_0_35px_rgba(239,68,68,0.5)] scale-105'
+                              : 'bg-white/10 border-white/30 text-white hover:border-purple-300/60 hover:scale-105'
+                          }`}
+                        >
+                          {isListening ? (
+                            <MicOff className="w-6 h-6 z-10" />
+                          ) : (
+                            <Mic className="w-6 h-6 z-10 text-purple-200" />
+                          )}
+                          {/* Ambient Glow Internal Sheen */}
+                          <div className="absolute inset-0 rounded-full bg-gradient-to-t from-purple-500/20 to-transparent pointer-events-none" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
-              
-              <div className="w-full h-full rounded-[32px] shadow-2xl bg-[#e5e7eb] overflow-hidden border border-white/10 relative z-10">
-                <iframe 
-                  src={`data:application/pdf;base64,${pdfBase64}#toolbar=0&navpanes=0&scrollbar=0`}
-                  className="w-full h-full rounded-[32px]"
-                  title="Resume Preview"
-                />
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </main>
+            </div>
+          </motion.div>
+
+          {/* ================= PDF PREVIEW PANEL ================= */}
+          <AnimatePresence>
+            {pdfBase64 && (
+              <motion.div
+                initial={{ opacity: 0, x: 40, scale: 0.96 }}
+                animate={{ opacity: 1, x: 0, scale: 1 }}
+                transition={{ duration: 0.8, ease: 'easeOut' }}
+                className="w-full md:w-[50%] h-[520px] md:h-[580px] relative"
+              >
+                <div className="p-1 sm:p-1.5 rounded-[32px] border border-white/20 bg-white/[0.02] backdrop-blur-3xl h-full shadow-2xl">
+                  <div className="relative rounded-[28px] border border-white/30 bg-black/40 overflow-hidden h-full flex flex-col">
+                    <div className="absolute top-4 right-4 z-20">
+                      <button
+                        onClick={downloadPdf}
+                        className="flex items-center gap-2 bg-white/10 hover:bg-white/20 backdrop-blur-xl border border-white/20 text-white px-5 py-2.5 rounded-full text-xs font-medium shadow-lg transition-all active:scale-95"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        Download PDF
+                      </button>
+                    </div>
+                    <iframe
+                      src={`data:application/pdf;base64,${pdfBase64}#toolbar=0&navpanes=0&scrollbar=0`}
+                      className="w-full h-full rounded-[26px]"
+                      title="Resume Preview"
+                    />
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </main>
+
+        {/* ================= FLOATING RIGHT SIDEBAR (DOCK) ================= */}
+        <motion.aside
+          initial={{ opacity: 0, x: 30 }}
+          animate={hasEntered ? { opacity: 1, x: 0 } : {}}
+          transition={{ duration: 0.8, delay: 0.3 }}
+          className="fixed right-5 md:right-8 top-1/2 -translate-y-1/2 z-30 hidden sm:flex flex-col items-center gap-6 p-3.5 rounded-full bg-black/20 backdrop-blur-2xl border border-white/15 shadow-[0_10px_30px_rgba(0,0,0,0.5)]"
+        >
+          <button
+            onMouseEnter={triggerAudioFeedback}
+            aria-label="Home"
+            className="p-2.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <Home className="w-5 h-5 stroke-[1.5]" />
+          </button>
+
+          <button
+            onMouseEnter={triggerAudioFeedback}
+            aria-label="Documents"
+            className="p-2.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <FileText className="w-5 h-5 stroke-[1.5]" />
+          </button>
+
+          {/* Active Voice Dock Button */}
+          <button
+            onMouseEnter={triggerAudioFeedback}
+            aria-label="Voice Active"
+            className="relative p-2.5 rounded-full text-white bg-white/10 shadow-[0_0_15px_rgba(192,132,252,0.4)] border border-purple-400/30"
+          >
+            <Mic className="w-5 h-5 stroke-[1.75] text-purple-200" />
+          </button>
+
+          <button
+            onMouseEnter={triggerAudioFeedback}
+            aria-label="AI Features"
+            className="p-2.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <Sparkles className="w-5 h-5 stroke-[1.5]" />
+          </button>
+
+          <button
+            onMouseEnter={triggerAudioFeedback}
+            aria-label="Settings"
+            className="p-2.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <Settings className="w-5 h-5 stroke-[1.5]" />
+          </button>
+        </motion.aside>
+      </div>
     </div>
   );
 }
