@@ -53,14 +53,15 @@ const INTERVIEW_STEP_URL =
 
 const TRANSCRIBE_URL =
   process.env.NEXT_PUBLIC_TRANSCRIBE_URL ||
-  'https://danielprincewill14--ats-resume-desktop-backend-transcrib-832ec1.modal.run ';
+  'https://danielprincewill14--ats-resume-desktop-backend-transcrib-832ec1.modal.run';
 
 const RENDER_PDF_URL =
   process.env.NEXT_PUBLIC_RENDER_PDF_URL ||
   'https://danielprincewill14--ats-resume-desktop-backend-render-pd-948bdd.modal.run';
 
 const requestJson = async (url: string, options: RequestInit = {}) => {
-  if (!url) {
+  const resolvedUrl = url?.trim();
+  if (!resolvedUrl) {
     throw new Error('Backend URL is not configured. Add environment variables to your configuration.');
   }
 
@@ -68,7 +69,7 @@ const requestJson = async (url: string, options: RequestInit = {}) => {
   const timeout = setTimeout(() => controller.abort(), 20000);
 
   try {
-    const response = await fetch(url, {
+    const response = await fetch(resolvedUrl, {
       ...options,
       signal: controller.signal,
       headers: {
@@ -148,6 +149,45 @@ const startBetterLoFiFocus = () => {
   };
 };
 
+const LissajousSpinner = () => {
+  const points: string[] = [];
+  for (let i = 0; i <= 720; i++) {
+    const t = (i / 720) * Math.PI * 2;
+    const x = 50 + 30 * Math.sin(3 * t + Math.PI / 2);
+    const y = 50 + 22 * Math.sin(2 * t);
+    points.push(`${i === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`);
+  }
+
+  const d = points.join(' ');
+
+  return (
+    <motion.svg
+      viewBox="0 0 100 100"
+      className="h-4 w-4 text-purple-300"
+      aria-label="Loading transcription"
+      initial={{ rotate: 0, scale: 1 }}
+      animate={{ rotate: 360, scale: [1, 1.12, 1] }}
+      transition={{ rotate: { duration: 2.2, ease: 'linear', repeat: Infinity }, scale: { duration: 1.8, ease: 'easeInOut', repeat: Infinity } }}
+    >
+      <motion.path
+        d={d}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        initial={{ strokeDasharray: '0 1000', strokeDashoffset: 0, opacity: 0.2 }}
+        animate={{
+          strokeDasharray: ['0 1000', '760 240', '0 1000'],
+          strokeDashoffset: [0, -180, 0],
+          opacity: [0.3, 1, 1, 0.4],
+        }}
+        transition={{ duration: 1.8, ease: 'easeInOut', repeat: Infinity }}
+      />
+    </motion.svg>
+  );
+};
+
 export default function App() {
   const [hasEntered, setHasEntered] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
@@ -161,8 +201,10 @@ export default function App() {
   ]);
 
   const [inputValue, setInputValue] = useState('');
+  const [transcribedDraft, setTranscribedDraft] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const [pdfBase64, setPdfBase64] = useState<string | null>(null);
 
   // Recording & Waveform State
@@ -180,6 +222,7 @@ export default function App() {
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const shouldDiscardRecordingRef = useRef(false);
 
   const [interviewState, setInterviewState] = useState<InterviewState>({
     current_step: 'GREETING_NAME',
@@ -242,6 +285,7 @@ export default function App() {
       const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
+      setTranscribedDraft('');
 
       // Setup Web Audio Analyser for visualizer
       const audioCtx = audioCtxRef.current || new (window.AudioContext || window.webkitAudioContext)();
@@ -270,14 +314,29 @@ export default function App() {
         if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
         stream.getTracks().forEach((track) => track.stop());
 
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        await sendAudioForTranscription(audioBlob);
+        const shouldDiscard = shouldDiscardRecordingRef.current;
+        shouldDiscardRecordingRef.current = false;
+
+        if (shouldDiscard) {
+          audioChunksRef.current = [];
+          setIsRecording(false);
+          setIsPaused(false);
+          setRecordingSeconds(0);
+          return;
+        }
+
+        if (audioChunksRef.current.length > 0) {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          await sendAudioForTranscription(audioBlob);
+        }
       };
 
       mediaRecorder.start();
       setIsRecording(true);
+      setIsPaused(false);
       setRecordingSeconds(0);
 
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = setInterval(() => {
         setRecordingSeconds((prev) => prev + 1);
       }, 1000);
@@ -286,13 +345,51 @@ export default function App() {
     }
   };
 
+  const togglePauseRecording = () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === 'inactive') return;
+
+    if (recorder.state === 'recording') {
+      recorder.pause();
+      setIsPaused(true);
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+      return;
+    }
+
+    if (recorder.state === 'paused') {
+      recorder.resume();
+      setIsPaused(false);
+      timerIntervalRef.current = setInterval(() => {
+        setRecordingSeconds((prev) => prev + 1);
+      }, 1000);
+    }
+  };
+
+  const cancelRecording = () => {
+    triggerAudioFeedback();
+    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    shouldDiscardRecordingRef.current = true;
+    audioChunksRef.current = [];
+    setTranscribedDraft('');
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    } else {
+      setIsRecording(false);
+      setIsPaused(false);
+      setRecordingSeconds(0);
+    }
+  };
+
   const stopRecording = () => {
     triggerAudioFeedback();
     if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    shouldDiscardRecordingRef.current = false;
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
     setIsRecording(false);
+    setIsPaused(false);
   };
 
   // Convert audio blob to text via /transcribe endpoint and write to text box for user editing
@@ -310,7 +407,8 @@ export default function App() {
         });
 
         if (data.transcript) {
-          setInputValue((prev) => (prev ? `${prev} ${data.transcript}` : data.transcript));
+          setInputValue((prev) => (prev ? `${prev} ${data.transcript}`.trim() : data.transcript));
+          setTranscribedDraft('');
         }
       } catch (err: any) {
         console.error('Transcription error:', err);
@@ -606,72 +704,97 @@ export default function App() {
                       </span>
                       {isTranscribing && (
                         <span className="flex items-center text-purple-300 font-mono gap-1.5">
-                          <Loader2 className="w-3 h-3 animate-spin" /> Transcribing Audio...
+                          <LissajousSpinner /> Transcribing Audio...
                         </span>
                       )}
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1 flex items-center bg-black/50 border border-white/25 rounded-full pl-5 pr-2 py-1.5 focus-within:border-purple-400/60 transition-colors">
-                        <input
-                          type="text"
-                          value={inputValue}
-                          onChange={(e) => setInputValue(e.target.value)}
-                          placeholder={
-                            isTranscribing
-                              ? 'Converting audio to text...'
-                              : 'Type response or tap mic to record speech...'
-                          }
-                          disabled={isLoading || isTranscribing || !!pdfBase64}
-                          className="flex-1 bg-transparent text-sm text-white focus:outline-none placeholder:text-slate-300"
-                        />
-                        <button
-                          type="submit"
-                          disabled={!inputValue.trim() || isLoading || isTranscribing}
-                          className="p-2.5 rounded-full bg-purple-600 text-white hover:bg-purple-500 transition-all disabled:opacity-30 disabled:hover:bg-purple-600"
-                        >
-                          <Send className="w-4 h-4" />
-                        </button>
-                      </div>
+                    <div className="flex items-center gap-3 w-full min-w-0">
+                      <motion.div
+                        animate={{
+                          width: isRecording ? 'calc(100% - 170px)' : '100%',
+                          x: isRecording ? -6 : 0,
+                        }}
+                        transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+                        className="min-w-0 overflow-hidden"
+                      >
+                        <div className="flex items-center bg-black/50 border border-white/25 rounded-full pl-5 pr-2 py-1.5 focus-within:border-purple-400/60 transition-colors">
+                          <input
+                            type="text"
+                            value={inputValue}
+                            onChange={(e) => setInputValue(e.target.value)}
+                            placeholder={
+                              isTranscribing
+                                ? 'Converting audio to text...'
+                                : 'Type response or tap mic to record speech...'
+                            }
+                            disabled={isLoading || isTranscribing || !!pdfBase64}
+                            className="flex-1 min-w-0 bg-transparent text-sm text-white focus:outline-none placeholder:text-slate-300"
+                          />
+                          <button
+                            type="submit"
+                            disabled={!inputValue.trim() || isLoading || isTranscribing}
+                            className="p-2.5 rounded-full bg-purple-600 text-white hover:bg-purple-500 transition-all disabled:opacity-30 disabled:hover:bg-purple-600"
+                          >
+                            <Send className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </motion.div>
 
-                      {/* Integrated Voice Mic Controls */}
-                      <div className="relative flex items-center justify-center flex-shrink-0">
+                      <div className="relative flex items-center justify-center shrink-0 w-[150px]">
                         <motion.div
                           layout
                           transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-                          className="p-1 rounded-full border border-white/20 bg-white/[0.04] backdrop-blur-md z-10"
+                          className="relative z-10 p-1 rounded-full border border-white/20 bg-white/[0.04] backdrop-blur-md"
                         >
-                          <button
-                            type="button"
-                            onClick={isRecording ? stopRecording : startRecording}
-                            disabled={isLoading || isTranscribing || !!pdfBase64}
-                            aria-label="Microphone Action"
-                            className={`relative flex items-center justify-center w-11 h-11 rounded-full border transition-colors duration-300 ${
-                              isRecording
-                                ? isWarningTime
-                                  ? 'bg-red-600 border-red-400 text-white shadow-[0_0_25px_rgba(239,68,68,0.8)]'
-                                  : 'bg-purple-600 border-purple-300 text-white shadow-[0_0_20px_rgba(192,132,252,0.6)]'
-                                : 'bg-white/10 border-white/30 text-white hover:border-purple-300/60 hover:scale-105'
-                            }`}
-                          >
-                            {isRecording ? (
-                              <Square className="w-4 h-4 fill-current" />
-                            ) : (
+                          {isRecording ? (
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={togglePauseRecording}
+                                className="flex items-center justify-center w-9 h-9 rounded-full bg-white/10 border border-white/30 text-white hover:bg-white/15"
+                                aria-label={isPaused ? 'Resume recording' : 'Pause recording'}
+                              >
+                                {isPaused ? <Mic className="w-4 h-4" /> : <Square className="w-4 h-4 fill-current" />}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={stopRecording}
+                                className="flex items-center justify-center w-9 h-9 rounded-full bg-purple-500/20 border border-purple-400/40 text-purple-100 hover:bg-purple-500/30"
+                                aria-label="Stop and transcribe recording"
+                              >
+                                <Square className="w-3.5 h-3.5 fill-current" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={cancelRecording}
+                                className="flex items-center justify-center w-9 h-9 rounded-full bg-red-500/20 border border-red-400/40 text-red-200 hover:bg-red-500/30"
+                                aria-label="Cancel recording without sending"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={startRecording}
+                              disabled={isLoading || isTranscribing || !!pdfBase64}
+                              aria-label="Microphone Action"
+                              className="relative flex items-center justify-center w-11 h-11 rounded-full border transition-colors duration-300 bg-white/10 border-white/30 text-white hover:border-purple-300/60 hover:scale-105"
+                            >
                               <Mic className="w-5 h-5 text-purple-200" />
-                            )}
+                            </button>
+                          )}
 
-                            {/* Blinking Recording Indicator */}
-                            {isRecording && (
-                              <span
-                                className={`absolute top-1.5 right-1.5 w-2.5 h-2.5 rounded-full animate-ping ${
-                                  isWarningTime ? 'bg-red-400' : 'bg-purple-300'
-                                }`}
-                              />
-                            )}
-                          </button>
+                          {isRecording && (
+                            <span
+                              className={`absolute top-1.5 right-1.5 w-2.5 h-2.5 rounded-full animate-ping ${
+                                isWarningTime ? 'bg-red-400' : 'bg-purple-300'
+                              }`}
+                            />
+                          )}
                         </motion.div>
 
-                        {/* Sliding Animated Waveform Visualizer */}
                         <AnimatePresence>
                           {isRecording && (
                             <motion.div
@@ -679,7 +802,7 @@ export default function App() {
                               animate={{ opacity: 1, width: 'auto', x: 0 }}
                               exit={{ opacity: 0, width: 0, x: -10 }}
                               transition={{ type: 'spring', stiffness: 280, damping: 24 }}
-                              className="overflow-hidden flex items-center absolute right-14"
+                              className="absolute right-[calc(100%+0.5rem)] top-1/2 -translate-y-1/2 overflow-hidden"
                             >
                               <div
                                 className={`flex items-center gap-2.5 px-4 py-2 rounded-full border backdrop-blur-xl transition-colors duration-300 ${
@@ -688,7 +811,6 @@ export default function App() {
                                     : 'bg-black/80 border-white/30'
                                 }`}
                               >
-                                {/* Timer Display */}
                                 <span
                                   className={`text-xs font-mono font-medium tracking-wider ${
                                     isWarningTime ? 'text-red-300 animate-pulse' : 'text-slate-100'
@@ -699,7 +821,6 @@ export default function App() {
 
                                 <div className="h-4 w-[1px] bg-white/30" />
 
-                                {/* Frequency Audio Bars */}
                                 <div className="flex items-center gap-1 h-6">
                                   {audioLevels.map((lvl, idx) => (
                                     <motion.div
@@ -718,6 +839,7 @@ export default function App() {
                         </AnimatePresence>
                       </div>
                     </div>
+
                   </form>
                 </div>
               </div>
