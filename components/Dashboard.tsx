@@ -1,1209 +1,805 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import Image from 'next/image';
-import { motion, AnimatePresence } from 'framer-motion';
-import { createClient } from '@supabase/supabase-js';
-import { Document, Page, pdfjs } from 'react-pdf';
+import React, { useState, useRef, useEffect } from 'react';
+import { Cormorant_Garamond } from 'next/font/google';
+import { motion, AnimatePresence, useMotionValue, useSpring, useTransform } from 'framer-motion';
 import {
-  Upload, Edit3, Download, Trash2, FileText, Maximize2, X, 
-  Loader2, PanelRightOpen, AlertCircle, Plus, User, 
-  GraduationCap, Briefcase, Code, Sparkles, MessageSquare, Mic, 
-  Square, CheckCheck, Wand2, PanelRightClose
+  Send,
+  Mic,
+  Square,
+  Sparkles,
+  User,
+  Download,
+  Keyboard,
+  Home,
+  FileText,
+  Settings,
+  Volume2,
+  VolumeX,
+  Menu,
+  X,
+  Loader2,
 } from 'lucide-react';
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
-
-const MODAL_ENDPOINTS = {
-  parsePdf: "https://danielprincewill14--ats-resume-desktop-backend-parse-pdf.modal.run",
-  generateMaster: "https://danielprincewill14--ats-resume-desktop-backend-generate--18b782.modal.run",
-  renderPdf: "https://danielprincewill14--ats-resume-desktop-backend-render-pd-948bdd.modal.run",
-  transcribeAudio: "https://danielprincewill14--ats-resume-desktop-backend-transcrib-832ec1.modal.run",
-};
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: false,
-    storage: typeof window !== 'undefined' ? window.localStorage : undefined,
-    flowType: 'implicit',
-  },
+const cormorant = Cormorant_Garamond({
+  weight: ['300', '400', '500', '600', '700'],
+  subsets: ['latin'],
+  style: ['normal', 'italic'],
 });
 
-interface MasterResume {
-  personal_info: {
-    name: string;
-    email: string;
-    phone?: string;
-    linkedin: string;
-    github?: string;
-  };
-  technical_skills: Array<{ category_name: string; subcategories: string[] }>;
-  education: Array<{ degree: string; institution: string; grade?: string; duration: string }>;
-  work_experience: Array<{ company: string; role: string; duration: string; achievements: string[] }>;
-  key_projects: Array<{ title: string; link?: string; achievements: string[] }>;
+interface InterviewState {
+  current_step: string;
+  probing_count: number;
+  resume_data: Record<string, any>;
+  transcript: string[];
 }
 
-const base64ToBlobUrl = (base64: string, contentType = 'application/pdf'): string => {
-  const byteCharacters = atob(base64);
-  const byteArrays = [];
+interface Message {
+  id: string;
+  role: 'ai' | 'user';
+  content: string;
+}
 
-  for (let offset = 0; offset < byteCharacters.length; offset += 512) {
-    const slice = byteCharacters.slice(offset, offset + 512);
-    const byteNumbers = new Array(slice.length);
-    for (let i = 0; i < slice.length; i++) {
-      byteNumbers[i] = slice.charCodeAt(i);
-    }
-    const byteArray = new Uint8Array(byteNumbers);
-    byteArrays.push(byteArray);
+declare global {
+  interface Window {
+    AudioContext: any;
+    webkitAudioContext: any;
+  }
+}
+
+const INTERVIEW_STEP_URL =
+  process.env.NEXT_PUBLIC_INTERVIEW_STEP_URL ||
+  'https://danielprincewill14--ats-resume-desktop-backend-interview-6a8fe2.modal.run';
+
+const TRANSCRIBE_URL =
+  process.env.NEXT_PUBLIC_TRANSCRIBE_URL ||
+  'https://danielprincewill14--ats-resume-desktop-backend-transcrib-832ec1.modal.run ';
+
+const RENDER_PDF_URL =
+  process.env.NEXT_PUBLIC_RENDER_PDF_URL ||
+  'https://danielprincewill14--ats-resume-desktop-backend-render-pd-948bdd.modal.run';
+
+const requestJson = async (url: string, options: RequestInit = {}) => {
+  if (!url) {
+    throw new Error('Backend URL is not configured. Add environment variables to your configuration.');
   }
 
-  const blob = new Blob(byteArrays, { type: contentType });
-  return URL.createObjectURL(blob);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers || {}),
+      },
+    });
+
+    const text = await response.text();
+    const payload = text ? JSON.parse(text) : {};
+
+    if (!response.ok) {
+      throw new Error(payload?.detail || payload?.error || `Request failed with status ${response.status}`);
+    }
+
+    return payload;
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw new Error('The backend request timed out. Please check the Modal endpoint and network access.');
+    }
+
+    if (error instanceof TypeError) {
+      throw new Error(
+        'Failed to reach the backend. Check the Modal URL, CORS settings, or environment variables.'
+      );
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 };
 
-interface DashboardProps {
-  user: any;
-  session: any;
-}
+// --- Audio Feedback Synth ---
+const playTuningForkSound = (audioCtx: AudioContext | null) => {
+  if (!audioCtx) return;
+  try {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, audioCtx.currentTime);
 
-export default function Dashboard({ user, session }: DashboardProps) {
-  useEffect(() => {
-    pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-  }, []);
+    gain.gain.setValueAtTime(0.18, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 1.4);
 
-  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-  const [pdfBase64, setPdfBase64] = useState<string | null>(null);
-  const [pdfBlobUrl, setPdfBlobUrl] = useState<string | null>(null);
-  const [numPages, setNumPages] = useState<number | null>(null);
-  const [pageNumber] = useState<number>(1);
-  const [pdfScale, setPdfScale] = useState<number>(1.0);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 1.4);
+  } catch (e) {
+    console.error(e);
+  }
+};
 
-  const [masterResume, setMasterResume] = useState<MasterResume | null>(null);
+const startBetterLoFiFocus = () => {
+  const audio = new Audio('/Marble_and_Glass.mp3');
+  audio.loop = true;
+  audio.volume = 0.04;
+  audio.preload = 'auto';
+
+  return {
+    audio,
+    play: async () => {
+      try {
+        await audio.play();
+      } catch (error) {
+        console.error('Unable to start ambient audio', error);
+      }
+    },
+    stop: () => {
+      audio.pause();
+      audio.currentTime = 0;
+    },
+    setVolume: (value: number) => {
+      audio.volume = value;
+    },
+  };
+};
+
+export default function App() {
+  const [hasEntered, setHasEntered] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: 'welcome-1',
+      role: 'ai',
+      content:
+        "Hi there! I'm your AI career coach. Let's build a Harvard-standard resume. To get started, what is your full name?",
+    },
+  ]);
+
+  const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [loadingText, setLoadingText] = useState('');
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [pdfBase64, setPdfBase64] = useState<string | null>(null);
 
-  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
-  const [activeEditSection, setActiveEditSection] = useState<'personal' | 'education' | 'experience' | 'projects' | 'skills'>('personal');
-  const [formData, setFormData] = useState<MasterResume | null>(null);
-
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const hasFetchedMasterRef = useRef<boolean>(false);
-
-  const [isChatOpen, setIsChatOpen] = useState(true);
-  const [chatInput, setChatInput] = useState('');
-  const [messages, setMessages] = useState<{ id: number; sender: 'user' | 'agent'; text: string; time: string }[]>([]);
-  
+  // Recording & Waveform State
   const [isRecording, setIsRecording] = useState(false);
-  const [recordTime, setRecordTime] = useState(0);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [audioLevels, setAudioLevels] = useState<number[]>([15, 25, 35, 20, 45, 30, 15]);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const ambientSoundRef = useRef<{ stop: () => void; play: () => Promise<void>; setVolume: (value: number) => void; audio: HTMLAudioElement } | null>(null);
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const animFrameRef = useRef<number | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
 
-  const authFetch = useCallback(async (url: string, options: RequestInit = {}) => {
-    const { data } = await supabase.auth.getSession();
-    const accessToken = data.session?.access_token || session?.access_token;
+  const [interviewState, setInterviewState] = useState<InterviewState>({
+    current_step: 'GREETING_NAME',
+    probing_count: 0,
+    resume_data: {},
+    transcript: [],
+  });
 
-    if (!accessToken) {
-      throw new Error("User not authenticated. Please log in with Google.");
-    }
+  // Parallax Setup
+  const mouseX = useMotionValue(0);
+  const mouseY = useMotionValue(0);
+  const smoothX = useSpring(mouseX, { stiffness: 35, damping: 25 });
+  const smoothY = useSpring(mouseY, { stiffness: 35, damping: 25 });
+  const bgX = useTransform(smoothX, [-0.5, 0.5], ['15px', '-15px']);
+  const bgY = useTransform(smoothY, [-0.5, 0.5], ['15px', '-15px']);
 
-    const headers = new Headers(options.headers || {});
-    headers.set("Authorization", `Bearer ${accessToken}`);
-
-    const response = await fetch(url, { ...options, headers });
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({ detail: response.statusText }));
-      throw new Error(err.detail || `API Request Failed with status ${response.status}`);
-    }
-    return response.json();
-  }, [session]);
-
-  const triggerPdfRender = useCallback(async (resumeData: MasterResume) => {
-    setErrorMessage(null);
-    try {
-      const data = await authFetch(MODAL_ENDPOINTS.renderPdf, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ master_resume: resumeData })
-      });
-      setPdfBase64(data.pdf_base64);
-    } catch (err: any) {
-      setErrorMessage(`PDF Render error: ${err.message}`);
-    }
-  }, [authFetch]);
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const { innerWidth, innerHeight } = window;
+    mouseX.set(e.clientX / innerWidth - 0.5);
+    mouseY.set(e.clientY / innerHeight - 0.5);
+  };
 
   useEffect(() => {
-    const handleResize = () => {
-      setIsChatOpen(window.innerWidth >= 1024);
-    };
-    handleResize();
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isLoading]);
 
-  const stopRecordingAndTranscribe = useCallback(() => {
-    if (!mediaRecorderRef.current) return;
-    setIsRecording(false);
+  const triggerAudioFeedback = () => {
+    if (audioCtxRef.current) playTuningForkSound(audioCtxRef.current);
+  };
 
-    if (mediaRecorderRef.current.stream) {
-      mediaRecorderRef.current.stream.getTracks().forEach((track) => track.stop());
-    }
+  const handleEnterExperience = async () => {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioContextClass();
+    audioCtxRef.current = ctx;
 
-    mediaRecorderRef.current.stop();
+    if (ctx.state === 'suspended') await ctx.resume();
 
-    mediaRecorderRef.current.onstop = async () => {
-      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/ogg' });
-      const reader = new FileReader();
-      reader.readAsDataURL(audioBlob);
-      reader.onloadend = async () => {
-        const base64Audio = (reader.result as string).split(',')[1];
-        setIsLoading(true);
+    ambientSoundRef.current = startBetterLoFiFocus();
+    await ambientSoundRef.current.play();
+    playTuningForkSound(ctx);
+    setHasEntered(true);
+  };
 
-        try {
-          const data = await authFetch(MODAL_ENDPOINTS.transcribeAudio, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ audio_base64: base64Audio })
-          });
-
-          if (data.transcript) {
-            setChatInput(data.transcript);
-          }
-        } catch (err: any) {
-          console.error(err);
-        } finally {
-          setIsLoading(false);
-        }
-      };
-    };
-  }, [authFetch]);
-
-  useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (isRecording) {
-      interval = setInterval(() => {
-        setRecordTime((prev) => {
-          if (prev >= 60) {
-            stopRecordingAndTranscribe();
-            return 0;
-          }
-          return prev + 1;
-        });
-      }, 1000);
+  const toggleMute = () => {
+    if (!ambientSoundRef.current) return;
+    if (isMuted) {
+      ambientSoundRef.current.setVolume(0.25);
+      setIsMuted(false);
     } else {
-      setRecordTime(0);
-    }
-    return () => clearInterval(interval);
-  }, [isRecording, stopRecordingAndTranscribe]);
-
-  useEffect(() => {
-    if (pdfBase64) {
-      const url = base64ToBlobUrl(pdfBase64);
-      setPdfBlobUrl(url);
-
-      return () => {
-        URL.revokeObjectURL(url);
-      };
-    } else {
-      setPdfBlobUrl(null);
-    }
-  }, [pdfBase64]);
-
-  useEffect(() => {
-    const fetchLatestMasterResume = async () => {
-      if (!user || hasFetchedMasterRef.current) return;
-      hasFetchedMasterRef.current = true;
-
-      setIsLoading(true);
-      setLoadingText("Fetching stored Master Resume from Supabase...");
-      setErrorMessage(null);
-
-      try {
-        const { data, error } = await supabase
-          .from('web_users')
-          .select(`
-            id,
-            master_resumes (
-              structured_json,
-              created_at
-            )
-          `)
-          .eq('auth_id', user.id)
-          .maybeSingle();
-
-        if (error) {
-          console.error("[SUPABASE ERROR]", error.message);
-          return;
-        }
-
-        const masterResumes = data?.master_resumes;
-        if (masterResumes && masterResumes.length > 0) {
-          const latestRecord = masterResumes.sort(
-            (a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-          )[0];
-
-          const parsedResume = latestRecord.structured_json as MasterResume;
-          setMasterResume(parsedResume);
-          setFormData(JSON.parse(JSON.stringify(parsedResume)));
-
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: Date.now(),
-              sender: 'agent',
-              text: `Loaded existing master resume for ${parsedResume.personal_info?.name || 'your profile'}. Rendering PDF preview...`,
-              time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            }
-          ]);
-
-          setLoadingText("Rendering Harvard PDF template...");
-          await triggerPdfRender(parsedResume);
-        }
-      } catch (err: any) {
-        console.error("[SUPABASE EXCEPTION]", err);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchLatestMasterResume();
-  }, [user, triggerPdfRender]);
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setUploadedFile(file);
-      setIsLoading(true);
-      setLoadingText("Extracting resume structure via Modal backend...");
-      setErrorMessage(null);
-
-      try {
-        const formDataPayload = new FormData();
-        formDataPayload.append("file", file);
-
-        const data = await authFetch(MODAL_ENDPOINTS.parsePdf, {
-          method: "POST",
-          body: formDataPayload
-        });
-
-        const parsedJson = data.structured_json || data.master_resume;
-        setMasterResume(parsedJson);
-        setFormData(JSON.parse(JSON.stringify(parsedJson)));
-        setPdfBase64(data.pdf_base64);
-
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now(),
-            sender: 'agent',
-            text: `Successfully parsed ${file.name}! Updated Master Resume saved.`,
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          }
-        ]);
-      } catch (err: any) {
-        setErrorMessage(`Error parsing PDF: ${err.message}`);
-      } finally {
-        setIsLoading(false);
-      }
+      ambientSoundRef.current.setVolume(0);
+      setIsMuted(true);
     }
   };
 
+  // --- AUDIO RECORDING & WAVEFORM LOGIC ---
   const startRecording = async () => {
+    triggerAudioFeedback();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) audioChunksRef.current.push(event.data);
+      // Setup Web Audio Analyser for visualizer
+      const audioCtx = audioCtxRef.current || new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 32;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      const updateWaveform = () => {
+        analyser.getByteFrequencyData(dataArray);
+        const normalized = Array.from(dataArray.slice(0, 8)).map(
+          (val) => Math.max(12, Math.min(50, (val / 255) * 55))
+        );
+        setAudioLevels(normalized);
+        animFrameRef.current = requestAnimationFrame(updateWaveform);
+      };
+      updateWaveform();
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      mediaRecorder.onstop = async () => {
+        if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+        stream.getTracks().forEach((track) => track.stop());
+
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        await sendAudioForTranscription(audioBlob);
       };
 
       mediaRecorder.start();
       setIsRecording(true);
+      setRecordingSeconds(0);
+
+      timerIntervalRef.current = setInterval(() => {
+        setRecordingSeconds((prev) => prev + 1);
+      }, 1000);
     } catch (err) {
-      console.error(err);
+      console.error('Microphone access denied:', err);
     }
   };
 
-  const handleToggleRecord = () => {
-    if (isRecording) {
-      stopRecordingAndTranscribe();
-    } else {
-      startRecording();
+  const stopRecording = () => {
+    triggerAudioFeedback();
+    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
     }
+    setIsRecording(false);
   };
 
-  const handleGenerateFromScratch = async () => {
-    const textToProcess = chatInput.trim() || messages.map(m => `${m.sender}: ${m.text}`).join('\n');
-    if (!textToProcess) return;
+  // Convert audio blob to text via /transcribe endpoint and write to text box for user editing
+  const sendAudioForTranscription = async (audioBlob: Blob) => {
+    setIsTranscribing(true);
 
+    const reader = new FileReader();
+    reader.readAsDataURL(audioBlob);
+    reader.onloadend = async () => {
+      try {
+        const base64Audio = (reader.result as string).split(',')[1];
+        const data = await requestJson(TRANSCRIBE_URL, {
+          method: 'POST',
+          body: JSON.stringify({ audio_base64: base64Audio, mime_type: 'audio/webm' }),
+        });
+
+        if (data.transcript) {
+          setInputValue((prev) => (prev ? `${prev} ${data.transcript}` : data.transcript));
+        }
+      } catch (err: any) {
+        console.error('Transcription error:', err);
+      } finally {
+        setIsTranscribing(false);
+      }
+    };
+  };
+
+  const handleSendTextMessage = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const textToSend = inputValue.trim();
+    if (!textToSend || isLoading) return;
+
+    triggerAudioFeedback();
+    setInputValue('');
+    setMessages((prev) => [...prev, { id: Date.now().toString(), role: 'user', content: textToSend }]);
     setIsLoading(true);
-    setLoadingText("Generating structured Master Resume from dictation...");
 
+    await executeInterviewStep({ user_input: textToSend });
+  };
+
+  const executeInterviewStep = async (payload: { user_input: string }) => {
     try {
-      const response = await authFetch(MODAL_ENDPOINTS.generateMaster, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dictation: textToProcess })
+      const data = await requestJson(INTERVIEW_STEP_URL, {
+        method: 'POST',
+        body: JSON.stringify({
+          state: interviewState,
+          ...payload,
+        }),
       });
 
-      if (response.structured_json || response.master_resume) {
-        const parsedJson = response.structured_json || response.master_resume;
-        setMasterResume(parsedJson);
-        setFormData(JSON.parse(JSON.stringify(parsedJson)));
-        if (response.pdf_base64) setPdfBase64(response.pdf_base64);
-      }
-
+      setInterviewState(data.state);
       setMessages((prev) => [
         ...prev,
-        {
-          id: Date.now(),
-          sender: 'agent',
-          text: "Generated structured Master Resume and updated live preview!",
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        }
+        { id: Date.now().toString() + '-ai', role: 'ai', content: data.ai_message },
       ]);
-    } catch (err: any) {
-      console.error(err);
-      setErrorMessage(`Generation failed: ${err.message}`);
+
+      if (data.is_complete && data.generated_resume) {
+        await handleRenderPdf(data.generated_resume);
+      }
+    } catch (error: any) {
+      console.error('Interview Step Error:', error);
+      setMessages((prev) => [
+        ...prev,
+        { id: Date.now().toString(), role: 'ai', content: `Error: ${error.message}. Please try again.` },
+      ]);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleSendMessage = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!chatInput.trim()) return;
+  const handleRenderPdf = async (structuredJson: any) => {
+    try {
+      setMessages((prev) => [
+        ...prev,
+        { id: 'rendering-msg', role: 'ai', content: 'Drafting your perfectly formatted Harvard resume...' },
+      ]);
 
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: Date.now(),
-        sender: 'user',
-        text: chatInput,
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      }
-    ]);
-    setChatInput('');
-  };
+      const data = await requestJson(RENDER_PDF_URL, {
+        method: 'POST',
+        body: JSON.stringify({ structured_json: structuredJson }),
+      });
+      setPdfBase64(data.pdf_base64);
 
-  const handleSaveStructuredEdit = async () => {
-    if (!formData) return;
-    setMasterResume(formData);
-    setIsEditModalOpen(false);
-    setIsLoading(true);
-    setLoadingText("Compiling PDF from updated section fields...");
-    await triggerPdfRender(formData);
-    setIsLoading(false);
-  };
-
-  const handleDownloadPdf = () => {
-    if (!pdfBlobUrl) return;
-    const link = document.createElement('a');
-    link.href = pdfBlobUrl;
-    link.download = `${masterResume?.personal_info?.name?.replace(/\s+/g, '_') || 'resume'}_harvard.pdf`;
-    link.click();
-  };
-
-  const clearFile = () => {
-    setUploadedFile(null);
-    setPdfBase64(null);
-    setPdfBlobUrl(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const openStructuredEditModal = () => {
-    if (masterResume) {
-      setFormData(JSON.parse(JSON.stringify(masterResume)));
-      setActiveEditSection('personal');
-      setIsEditModalOpen(true);
+      setMessages((prev) => [
+        ...prev,
+        { id: 'done-msg', role: 'ai', content: 'Resume complete! Preview updated on the right.' },
+      ]);
+    } catch (error) {
+      console.error('PDF Render Error:', error);
     }
   };
 
-  const userName = user?.user_metadata?.full_name || user?.user_metadata?.name || user?.email?.split('@')[0] || "User";
+  const downloadPdf = () => {
+    triggerAudioFeedback();
+    if (!pdfBase64) return;
+    const link = document.createElement('a');
+    link.href = `data:application/pdf;base64,${pdfBase64}`;
+    link.download = `${interviewState.resume_data?.personal_info?.name || 'Harvard'}_Resume.pdf`;
+    link.click();
+  };
+
+  // Helper formatting for seconds
+  const formatTime = (sec: number) => {
+    const mins = Math.floor(sec / 60);
+    const secs = sec % 60;
+    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+  };
+
+  const isWarningTime = recordingSeconds >= 45;
 
   return (
-    <div className="flex h-full w-full gap-x-6 relative">
-      <div className="flex-1 flex flex-col gap-y-8 md:gap-y-10 pb-8 overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-        {errorMessage && (
-          <div className="p-4 bg-red-50 border border-red-200 rounded-2xl flex items-center justify-between text-red-700 text-xs md:text-sm shadow-xs">
-            <div className="flex items-center gap-2.5">
-              <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
-              <span>{errorMessage}</span>
-            </div>
-            <button onClick={() => setErrorMessage(null)} className="p-1 hover:bg-red-100 rounded-lg text-red-500">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        )}
-
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-sm font-medium text-slate-500">Welcome back,</h2>
-            <h1 className="text-2xl md:text-3xl font-serif font-bold text-slate-900 flex items-center gap-2 mt-0.5">
-              <span className="italic">{userName}</span> <span className="text-2xl">👋</span>
-            </h1>
-            <p className="text-xs md:text-sm text-slate-500 mt-1">Build and tailor Harvard-style resumes powered by Modal backends.</p>
-          </div>
-
-          {!isChatOpen && (
-            <button 
-              onClick={() => setIsChatOpen(true)}
-              className="flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50 transition-colors"
+    <div className="relative min-h-screen w-full bg-[#030304] text-white overflow-hidden selection:bg-purple-500/30">
+      {/* ================= ENTRY MODAL ================= */}
+      <AnimatePresence>
+        {!hasEntered && (
+          <motion.div
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0, transition: { duration: 0.8, ease: 'easeInOut' } }}
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#030304] text-white px-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.8 }}
+              className="flex flex-col items-center gap-6 text-center max-w-sm"
             >
-              <PanelRightOpen className="w-4 h-4 text-violet-600" />
-              Open AI Assistant
+              <div className="p-4 rounded-full bg-white/[0.05] border border-white/20 shadow-[0_0_30px_rgba(255,255,255,0.08)]">
+                <Volume2 className="w-6 h-6 text-slate-100 stroke-[1.5]" />
+              </div>
+              <div>
+                <h3 className={`${cormorant.className} text-3xl font-normal text-slate-100 tracking-wide`}>
+                  YourResume.io
+                </h3>
+                <p className="text-xs text-slate-200 mt-2 tracking-widest uppercase font-medium">
+                  Continuous Lo-Fi Focus Sound Active
+                </p>
+              </div>
+
+              <button
+                onClick={handleEnterExperience}
+                className="mt-2 px-8 py-3 rounded-full bg-white text-black font-medium text-sm tracking-wide hover:bg-slate-200 transition-all duration-300 shadow-[0_0_25px_rgba(255,255,255,0.2)] hover:scale-105 active:scale-95"
+              >
+                Begin Interview Session
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ================= MAIN CONTAINER ================= */}
+      <div onMouseMove={handleMouseMove} className="relative min-h-screen w-full flex flex-col justify-between">
+        <motion.div
+          style={{ x: bgX, y: bgY, scale: 1.05 }}
+          className="absolute inset-0 pointer-events-none z-0 flex items-center justify-center"
+        >
+          <img
+            src="/dashboard.jpeg"
+            alt="Background Environment"
+            className="w-full h-full object-cover object-center opacity-85"
+          />
+          <div className="absolute inset-0 bg-radial-gradient from-transparent via-[#030304]/40 to-[#030304]/95" />
+        </motion.div>
+
+        {/* ================= TOP NAVBAR & MOBILE HAMBURGER DOCK ================= */}
+        <header className="relative z-30 w-full px-6 md:px-16 pt-8 pb-4 flex items-center justify-between">
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={hasEntered ? { opacity: 1, y: 0 } : {}}
+            className={`${cormorant.className} text-3xl md:text-4xl tracking-tight font-normal text-slate-100`}
+          >
+            YourResume.io
+          </motion.div>
+
+          <div className="flex items-center gap-3">
+            {/* Sound Mute Toggle */}
+            <button
+              onClick={toggleMute}
+              className="p-3 rounded-full bg-black/40 border border-white/20 backdrop-blur-xl hover:bg-white/10 transition-colors text-slate-200"
+            >
+              {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
             </button>
-          )}
-        </div>
 
-        <div className="flex flex-col gap-y-12">
-          <motion.div whileHover={{ y: -2 }} className="relative rounded-3xl p-6 md:p-8 flex items-center justify-between overflow-hidden shadow-sm min-h-[220px] border border-violet-100/80">
-            <Image src="/illustration_boy.jpg" alt="Background" fill className="object-cover object-center z-0" />
-            <div className="absolute inset-0 z-0 bg-gradient-to-r from-[#F8F9FD] via-[#F8F9FD]/60 to-transparent" />
+            {/* Mobile Hamburger Dock Button */}
+            <div className="relative sm:hidden">
+              <button
+                onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+                className="p-3 rounded-full bg-black/60 border border-white/25 backdrop-blur-2xl text-slate-100 hover:bg-white/10 transition-all"
+              >
+                {isMobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+              </button>
 
-            <div className="relative z-10 max-w-lg space-y-3">
-              <h3 className="text-xl md:text-2xl font-serif font-bold text-slate-900">Let's get started</h3>
-              <p className="text-xs md:text-sm text-slate-600 leading-relaxed max-w-sm">
-                Upload an existing resume to parse into structured sections, or dictate details directly to the agent.
-              </p>
+              {/* Mobile Horizontal Scaled Glass Bar */}
+              <AnimatePresence>
+                {isMobileMenuOpen && (
+                  <motion.nav
+                    initial={{ opacity: 0, scale: 0.85, y: -10 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.85, y: -10 }}
+                    onMouseLeave={() => setIsMobileMenuOpen(false)}
+                    className="absolute right-0 top-14 z-40 flex items-center gap-4 p-3 rounded-full bg-black/80 backdrop-blur-3xl border border-white/30 shadow-[0_10px_30px_rgba(0,0,0,0.9)]"
+                  >
+                    <button className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10">
+                      <Home className="w-4 h-4" />
+                    </button>
+                    <button className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10">
+                      <FileText className="w-4 h-4" />
+                    </button>
+                    <button className="p-2.5 rounded-full text-white bg-purple-500/30 border border-purple-400/50">
+                      <Mic className="w-4 h-4 text-purple-100" />
+                    </button>
+                    <button className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10">
+                      <Sparkles className="w-4 h-4" />
+                    </button>
+                    <button className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10">
+                      <Settings className="w-4 h-4" />
+                    </button>
+                  </motion.nav>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+        </header>
 
-              <input type="file" accept=".pdf" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
+        {/* ================= MAIN INTERVIEW MODAL ================= */}
+        <main className="relative z-10 w-full max-w-[1600px] mx-auto px-4 md:px-12 my-auto py-6 flex flex-col md:flex-row gap-8 items-center justify-center min-h-[82vh]">
+          
+          <motion.div
+            initial={{ opacity: 0, y: 30, scale: 0.96 }}
+            animate={hasEntered ? { opacity: 1, y: 0, scale: 1 } : {}}
+            transition={{ duration: 0.9, ease: [0.16, 1, 0.3, 1] }}
+            className={`w-full transition-all duration-700 ease-in-out ${
+              pdfBase64 ? 'md:w-[50%]' : 'max-w-3xl mx-auto'
+            }`}
+          >
+            <div className="p-1 sm:p-1.5 rounded-[32px] border border-white/20 bg-white/[0.02] backdrop-blur-3xl shadow-[0_20px_50px_rgba(0,0,0,0.6)]">
+              <div className="relative rounded-[28px] border border-white/30 bg-black/40 backdrop-blur-2xl overflow-hidden flex flex-col h-[520px] md:h-[580px] shadow-inner">
+                
+                {/* Header */}
+                <div className="px-6 md:px-8 py-5 border-b border-white/15 bg-white/[0.04] flex items-center justify-between">
+                  <div>
+                    <h2 className={`${cormorant.className} text-3xl sm:text-4xl font-normal text-slate-100 tracking-wide`}>
+                      Interview Session
+                    </h2>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
+                      <span className="text-[11px] font-semibold text-slate-200 tracking-widest uppercase">
+                        AI Agent Active
+                      </span>
+                    </div>
+                  </div>
 
-              {!uploadedFile ? (
-                <motion.button
-                  onClick={() => fileInputRef.current?.click()}
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  disabled={isLoading}
-                  className="mt-4 inline-flex items-center gap-2 bg-violet-600 text-white font-medium text-xs md:text-sm px-5 py-2.5 rounded-xl shadow-md hover:bg-violet-700 transition-all disabled:opacity-50"
-                >
-                  <Upload className="w-4 h-4" />
-                  Upload Resume (PDF)
-                </motion.button>
-              ) : (
-                <div className="mt-4 inline-flex items-center gap-3 bg-white/90 backdrop-blur px-4 py-2 rounded-xl border border-slate-200 shadow-sm">
-                  <FileText className="w-5 h-5 text-violet-600" />
-                  <span className="text-xs md:text-sm font-medium text-slate-700 truncate max-w-[150px]">{uploadedFile.name}</span>
-                  <button onClick={clearFile} className="p-1 hover:bg-slate-100 rounded-md text-slate-500 transition-colors">
-                    <X className="w-4 h-4" />
-                  </button>
+                  <div className="px-4 py-1.5 rounded-full bg-white/10 border border-white/25 backdrop-blur-md text-xs font-medium text-slate-100 tracking-wider">
+                    {interviewState.current_step.replace('_', ' ')}
+                  </div>
                 </div>
-              )}
+
+                {/* Messages Feed */}
+                <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-6 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+                  <AnimatePresence initial={false}>
+                    {messages.map((msg) => (
+                      <motion.div
+                        key={msg.id}
+                        initial={{ opacity: 0, y: 15 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className={`flex gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}
+                      >
+                        <div
+                          className={`w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center border shadow-lg ${
+                            msg.role === 'user'
+                              ? 'bg-purple-500/30 border-purple-400/50 text-purple-100'
+                              : 'bg-white/15 border-white/25 text-white'
+                          }`}
+                        >
+                          {msg.role === 'user' ? <User className="w-4 h-4" /> : <Sparkles className="w-4 h-4 text-purple-200" />}
+                        </div>
+
+                        <div
+                          className={`max-w-[80%] text-sm sm:text-base font-normal leading-relaxed p-4 px-5 rounded-2xl backdrop-blur-md ${
+                            msg.role === 'user'
+                              ? 'bg-purple-900/50 text-slate-100 rounded-tr-none border border-purple-400/30'
+                              : 'bg-white/10 text-slate-100 rounded-tl-none border border-white/20'
+                          }`}
+                        >
+                          {msg.content}
+                        </div>
+                      </motion.div>
+                    ))}
+                  </AnimatePresence>
+
+                  {isLoading && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-4">
+                      <div className="w-9 h-9 rounded-full bg-white/15 border border-white/25 flex items-center justify-center">
+                        <Sparkles className="w-4 h-4 text-purple-200" />
+                      </div>
+                      <div className="bg-white/10 border border-white/20 rounded-2xl rounded-tl-none p-4 px-6 flex items-center gap-2">
+                        <motion.div className="w-1.5 h-1.5 bg-slate-200 rounded-full" animate={{ y: [0, -4, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0 }} />
+                        <motion.div className="w-1.5 h-1.5 bg-slate-200 rounded-full" animate={{ y: [0, -4, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0.2 }} />
+                        <motion.div className="w-1.5 h-1.5 bg-slate-200 rounded-full" animate={{ y: [0, -4, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0.4 }} />
+                      </div>
+                    </motion.div>
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
+
+                {/* Bottom Interactive Input Dock */}
+                <div className="p-5 border-t border-white/15 bg-black/40 backdrop-blur-xl relative">
+                  <form onSubmit={handleSendTextMessage} className="flex flex-col gap-3">
+                    <div className="flex items-center justify-between text-[11px] uppercase font-semibold text-slate-200 tracking-wider">
+                      <span className="flex items-center">
+                        <Keyboard className="w-3.5 h-3.5 mr-2 text-purple-300" /> Response Text Box
+                      </span>
+                      {isTranscribing && (
+                        <span className="flex items-center text-purple-300 font-mono gap-1.5">
+                          <Loader2 className="w-3 h-3 animate-spin" /> Transcribing Audio...
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 flex items-center bg-black/50 border border-white/25 rounded-full pl-5 pr-2 py-1.5 focus-within:border-purple-400/60 transition-colors">
+                        <input
+                          type="text"
+                          value={inputValue}
+                          onChange={(e) => setInputValue(e.target.value)}
+                          placeholder={
+                            isTranscribing
+                              ? 'Converting audio to text...'
+                              : 'Type response or tap mic to record speech...'
+                          }
+                          disabled={isLoading || isTranscribing || !!pdfBase64}
+                          className="flex-1 bg-transparent text-sm text-white focus:outline-none placeholder:text-slate-300"
+                        />
+                        <button
+                          type="submit"
+                          disabled={!inputValue.trim() || isLoading || isTranscribing}
+                          className="p-2.5 rounded-full bg-purple-600 text-white hover:bg-purple-500 transition-all disabled:opacity-30 disabled:hover:bg-purple-600"
+                        >
+                          <Send className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      {/* Integrated Voice Mic Controls */}
+                      <div className="relative flex items-center justify-center flex-shrink-0">
+                        <motion.div
+                          layout
+                          transition={{ type: 'spring', stiffness: 300, damping: 25 }}
+                          className="p-1 rounded-full border border-white/20 bg-white/[0.04] backdrop-blur-md z-10"
+                        >
+                          <button
+                            type="button"
+                            onClick={isRecording ? stopRecording : startRecording}
+                            disabled={isLoading || isTranscribing || !!pdfBase64}
+                            aria-label="Microphone Action"
+                            className={`relative flex items-center justify-center w-11 h-11 rounded-full border transition-colors duration-300 ${
+                              isRecording
+                                ? isWarningTime
+                                  ? 'bg-red-600 border-red-400 text-white shadow-[0_0_25px_rgba(239,68,68,0.8)]'
+                                  : 'bg-purple-600 border-purple-300 text-white shadow-[0_0_20px_rgba(192,132,252,0.6)]'
+                                : 'bg-white/10 border-white/30 text-white hover:border-purple-300/60 hover:scale-105'
+                            }`}
+                          >
+                            {isRecording ? (
+                              <Square className="w-4 h-4 fill-current" />
+                            ) : (
+                              <Mic className="w-5 h-5 text-purple-200" />
+                            )}
+
+                            {/* Blinking Recording Indicator */}
+                            {isRecording && (
+                              <span
+                                className={`absolute top-1.5 right-1.5 w-2.5 h-2.5 rounded-full animate-ping ${
+                                  isWarningTime ? 'bg-red-400' : 'bg-purple-300'
+                                }`}
+                              />
+                            )}
+                          </button>
+                        </motion.div>
+
+                        {/* Sliding Animated Waveform Visualizer */}
+                        <AnimatePresence>
+                          {isRecording && (
+                            <motion.div
+                              initial={{ opacity: 0, width: 0, x: -10 }}
+                              animate={{ opacity: 1, width: 'auto', x: 0 }}
+                              exit={{ opacity: 0, width: 0, x: -10 }}
+                              transition={{ type: 'spring', stiffness: 280, damping: 24 }}
+                              className="overflow-hidden flex items-center absolute right-14"
+                            >
+                              <div
+                                className={`flex items-center gap-2.5 px-4 py-2 rounded-full border backdrop-blur-xl transition-colors duration-300 ${
+                                  isWarningTime
+                                    ? 'bg-red-950/80 border-red-500/50 shadow-[0_0_20px_rgba(239,68,68,0.4)]'
+                                    : 'bg-black/80 border-white/30'
+                                }`}
+                              >
+                                {/* Timer Display */}
+                                <span
+                                  className={`text-xs font-mono font-medium tracking-wider ${
+                                    isWarningTime ? 'text-red-300 animate-pulse' : 'text-slate-100'
+                                  }`}
+                                >
+                                  {formatTime(recordingSeconds)}
+                                </span>
+
+                                <div className="h-4 w-[1px] bg-white/30" />
+
+                                {/* Frequency Audio Bars */}
+                                <div className="flex items-center gap-1 h-6">
+                                  {audioLevels.map((lvl, idx) => (
+                                    <motion.div
+                                      key={idx}
+                                      animate={{ height: `${lvl * 0.6}px` }}
+                                      transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+                                      className={`w-1 rounded-full ${
+                                        isWarningTime ? 'bg-red-500' : 'bg-purple-300'
+                                      }`}
+                                    />
+                                  ))}
+                                </div>
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+              </div>
             </div>
           </motion.div>
 
-          <div className="bg-white border border-slate-200/70 rounded-3xl p-6 md:p-8 shadow-sm space-y-6">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <h3 className="text-lg md:text-xl font-serif font-bold text-slate-900">Live Harvard PDF Preview</h3>
-                <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-slate-100 rounded-lg text-xs font-medium text-slate-600 border border-slate-200/60">
-                  <FileText className="w-3.5 h-3.5 text-slate-400" />
-                  {masterResume ? `${masterResume.personal_info?.name?.replace(/\s+/g, '_')}_master.pdf` : 'resume_draft.pdf'}
-                </span>
-              </div>
-
-              <div className="flex items-center gap-2 md:gap-3">
-                <button 
-                  onClick={openStructuredEditModal} 
-                  disabled={!masterResume} 
-                  className="flex items-center gap-1.5 px-3.5 py-2 bg-violet-50 border border-violet-200 rounded-xl text-xs font-semibold text-violet-700 hover:bg-violet-100 transition-colors disabled:opacity-40"
-                >
-                  <Edit3 className="w-3.5 h-3.5 text-violet-600" />
-                  Edit Resume Sections
-                </button>
-                <button onClick={handleDownloadPdf} disabled={!pdfBlobUrl} className="flex items-center gap-1.5 px-3 py-2 bg-slate-900 text-white rounded-xl text-xs font-medium hover:bg-slate-800 transition-colors disabled:opacity-40">
-                  <Download className="w-3.5 h-3.5" />
-                  Download PDF
-                </button>
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-slate-700 bg-slate-800 overflow-hidden shadow-inner relative">
-              <div className="bg-slate-900 px-5 py-3 flex items-center justify-between text-slate-300 text-xs border-b border-slate-700">
-                <div className="flex items-center gap-4">
-                  <span>Page {pageNumber} of {numPages || 1}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button onClick={() => setPdfScale(s => Math.max(0.4, s - 0.1))} className="px-2 py-1 bg-slate-800 rounded hover:bg-slate-700">-</button>
-                  <span>{Math.round(pdfScale * 100)}%</span>
-                  <button onClick={() => setPdfScale(s => Math.min(1.6, s + 0.1))} className="px-2 py-1 bg-slate-800 rounded hover:bg-slate-700">+</button>
-                </div>
-                <div className="flex items-center gap-4"><Maximize2 className="w-4 h-4" /></div>
-              </div>
-
-              <div className="p-4 md:p-8 bg-slate-700/50 flex justify-center min-h-[550px] md:min-h-[650px] items-center overflow-auto">
-                {isLoading ? (
-                  <div className="flex flex-col items-center space-y-3 text-white">
-                    <Loader2 className="w-8 h-8 animate-spin text-violet-400" />
-                    <p className="text-xs md:text-sm font-medium">{loadingText}</p>
-                  </div>
-                ) : pdfBlobUrl ? (
-                  <Document
-                    file={pdfBlobUrl}
-                    onLoadSuccess={({ numPages }) => setNumPages(numPages)}
-                    loading={
-                      <div className="flex items-center gap-2 text-white text-xs">
-                        <Loader2 className="w-4 h-4 animate-spin text-violet-400" />
-                        Loading PDF canvas...
-                      </div>
-                    }
-                    error={
-                      <div className="text-red-400 text-xs text-center p-4">
-                        Failed to render PDF canvas. Try clicking "Download PDF" directly.
-                      </div>
-                    }
-                  >
-                    <Page
-                      pageNumber={pageNumber}
-                      scale={pdfScale}
-                      renderTextLayer={false}
-                      renderAnnotationLayer={false}
-                      className="shadow-2xl rounded overflow-hidden"
-                    />
-                  </Document>
-                ) : (
-                  <div className="text-slate-400 text-center space-y-2">
-                    <FileText className="w-12 h-12 mx-auto opacity-40" />
-                    <p className="text-xs md:text-sm">Upload a PDF or dictated text to render dynamic PDF canvas here.</p>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <AnimatePresence>
-        {isChatOpen && (
-          <motion.aside 
-            initial={{ opacity: 0, x: 300 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 300 }}
-            transition={{ duration: 0.2 }}
-            className="fixed lg:static inset-y-0 right-0 z-30 w-full sm:w-[360px] lg:w-[380px] border-l border-slate-200/70 bg-white flex flex-col p-6 shrink-0 h-full shadow-2xl lg:shadow-none rounded-3xl lg:rounded-none"
-          >
-            <div className="flex-none flex items-center justify-between pb-4 border-b border-slate-100">
-              <div className="flex items-center gap-3">
-                <Image src="/logo.jpg" alt="AI Agent" width={40} height={40} className="rounded-full object-cover shadow-sm border border-slate-100" />
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900">AI Career Agent</h3>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    <span className="text-[11px] text-slate-400">Modal Backend Connected</span>
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center gap-2 text-slate-400">
-                <button onClick={() => setMessages([])} className="hover:text-slate-600 transition-colors p-1.5" title="Clear Chat">
-                  <Trash2 className="w-4 h-4" />
-                </button>
-                <button onClick={() => setIsChatOpen(false)} className="hover:text-slate-600 transition-colors p-1.5" title="Close Panel">
-                  <PanelRightClose className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto pr-2 space-y-4 my-4 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-              {messages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-center space-y-3 opacity-50">
-                  <MessageSquare className="w-10 h-10 text-slate-300" />
-                  <p className="text-xs md:text-sm text-slate-400">Voice record or type details to generate or tailor your resume.</p>
-                </div>
-              ) : (
-                messages.map((msg) => (
-                  <div key={msg.id} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
-                    <div className={`max-w-[85%] p-3.5 rounded-2xl text-[13px] leading-relaxed shadow-sm ${msg.sender === 'user' ? 'bg-violet-100/80 text-violet-950 rounded-br-sm' : 'bg-slate-50 text-slate-700 border border-slate-100 rounded-bl-sm'}`}>
-                      {msg.text}
-                    </div>
-                    <div className="flex items-center gap-1 mt-1 px-1">
-                      <span className="text-[10px] text-slate-400">{msg.time}</span>
-                      {msg.sender === 'user' && <CheckCheck className="w-3.5 h-3.5 text-violet-500" />}
-                    </div>
-                  </div>
-                ))
-              )}
-
-              {isRecording && (
-                <div className="p-3 bg-amber-50/50 border border-amber-100 rounded-2xl space-y-2 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-medium text-amber-700 flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
-                      Recording audio...
-                    </span>
-                    <span className="text-xs font-mono text-amber-600">
-                      00:{recordTime.toString().padStart(2, '0')}
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="flex-none space-y-4 pt-4 border-t border-slate-100">
-              <form onSubmit={handleSendMessage} className="flex items-center gap-2.5">
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Type or record dictation..."
-                  className="flex-1 bg-slate-50 border border-slate-200/80 rounded-xl px-3.5 py-2.5 text-xs md:text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:border-violet-400"
-                />
-                <motion.button
-                  type="button"
-                  whileTap={{ scale: 0.92 }}
-                  onClick={handleToggleRecord}
-                  className={`p-2.5 rounded-xl shadow-md transition-colors shrink-0 flex items-center justify-center ${
-                    isRecording ? 'bg-red-500 text-white animate-pulse' : 'bg-violet-600 hover:bg-violet-700 text-white'
-                  }`}
-                >
-                  {isRecording ? <Square className="w-4 h-4 fill-current" /> : <Mic className="w-4 h-4" />}
-                </motion.button>
-              </form>
-
-              <motion.button
-                onClick={handleGenerateFromScratch}
-                whileHover={{ scale: 1.01 }}
-                whileTap={{ scale: 0.98 }}
-                disabled={isLoading}
-                className="w-full py-3 bg-violet-600 text-white rounded-xl font-medium text-xs md:text-sm flex items-center justify-center gap-2 shadow-lg shadow-violet-200 hover:bg-violet-700 transition-all disabled:opacity-50"
+          {/* ================= PDF PREVIEW PANEL ================= */}
+          <AnimatePresence>
+            {pdfBase64 && (
+              <motion.div
+                initial={{ opacity: 0, x: 40, scale: 0.96 }}
+                animate={{ opacity: 1, x: 0, scale: 1 }}
+                transition={{ duration: 0.8, ease: 'easeOut' }}
+                className="w-full md:w-[50%] h-[520px] md:h-[580px] relative"
               >
-                <Wand2 className="w-4 h-4" />
-                Generate From Dictation
-              </motion.button>
-            </div>
-          </motion.aside>
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {isEditModalOpen && formData && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.96 }} 
-              animate={{ opacity: 1, scale: 1 }} 
-              exit={{ opacity: 0, scale: 0.96 }} 
-              className="bg-white w-full max-w-4xl rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
-            >
-              <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-white shrink-0">
-                <div>
-                  <h3 className="font-serif font-bold text-slate-900 text-lg md:text-xl">Edit Master Resume</h3>
-                  <p className="text-xs text-slate-500 mt-0.5">Select a section on the left to review or edit its fields.</p>
-                </div>
-                <button onClick={() => setIsEditModalOpen(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-400 hover:text-slate-600">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-                <div className="w-full md:w-56 bg-slate-50 border-r border-slate-100 p-3 flex md:flex-col gap-1.5 shrink-0 overflow-x-auto md:overflow-y-auto">
-                  {[
-                    { id: 'personal', label: 'Personal Info', icon: User },
-                    { id: 'education', label: 'Education', icon: GraduationCap },
-                    { id: 'experience', label: 'Work Experience', icon: Briefcase },
-                    { id: 'projects', label: 'Key Projects', icon: Code },
-                    { id: 'skills', label: 'Skills & Tools', icon: Sparkles },
-                  ].map((tab) => {
-                    const Icon = tab.icon;
-                    const isActive = activeEditSection === tab.id;
-                    return (
+                <div className="p-1 sm:p-1.5 rounded-[32px] border border-white/20 bg-white/[0.02] backdrop-blur-3xl h-full shadow-2xl">
+                  <div className="relative rounded-[28px] border border-white/30 bg-black/40 overflow-hidden h-full flex flex-col">
+                    <div className="absolute top-4 right-4 z-20">
                       <button
-                        key={tab.id}
-                        onClick={() => setActiveEditSection(tab.id as any)}
-                        className={`flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all whitespace-nowrap md:whitespace-normal ${
-                          isActive 
-                            ? 'bg-violet-600 text-white shadow-md shadow-violet-200' 
-                            : 'text-slate-600 hover:bg-slate-200/60'
-                        }`}
+                        onClick={downloadPdf}
+                        className="flex items-center gap-2 bg-white/10 hover:bg-white/20 backdrop-blur-xl border border-white/20 text-white px-5 py-2.5 rounded-full text-xs font-medium shadow-lg transition-all active:scale-95"
                       >
-                        <Icon className="w-4 h-4 shrink-0" />
-                        <span>{tab.label}</span>
+                        <Download className="w-3.5 h-3.5" />
+                        Download PDF
                       </button>
-                    );
-                  })}
+                    </div>
+                    <iframe
+                      src={`data:application/pdf;base64,${pdfBase64}#toolbar=0&navpanes=0&scrollbar=0`}
+                      className="w-full h-full rounded-[26px]"
+                      title="Resume Preview"
+                    />
+                  </div>
                 </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </main>
 
-                <div className="flex-1 p-6 overflow-y-auto bg-white space-y-6">
-                  {activeEditSection === 'personal' && (
-                    <div className="space-y-4">
-                      <h4 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-2">Personal & Contact Details</h4>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-xs font-medium text-slate-700 mb-1">Full Name</label>
-                          <input
-                            type="text"
-                            value={formData.personal_info.name || ''}
-                            onChange={(e) => setFormData({
-                              ...formData,
-                              personal_info: { ...formData.personal_info, name: e.target.value }
-                            })}
-                            className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-xs md:text-sm focus:outline-none focus:border-violet-500"
-                            placeholder="John Doe"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-slate-700 mb-1">Email Address</label>
-                          <input
-                            type="email"
-                            value={formData.personal_info.email || ''}
-                            onChange={(e) => setFormData({
-                              ...formData,
-                              personal_info: { ...formData.personal_info, email: e.target.value }
-                            })}
-                            className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-xs md:text-sm focus:outline-none focus:border-violet-500"
-                            placeholder="john@example.com"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-slate-700 mb-1">Phone Number (Optional)</label>
-                          <input
-                            type="text"
-                            value={formData.personal_info.phone || ''}
-                            onChange={(e) => setFormData({
-                              ...formData,
-                              personal_info: { ...formData.personal_info, phone: e.target.value }
-                            })}
-                            className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-xs md:text-sm focus:outline-none focus:border-violet-500"
-                            placeholder="+1 234 567 890"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-slate-700 mb-1">LinkedIn Profile</label>
-                          <input
-                            type="text"
-                            value={formData.personal_info.linkedin || ''}
-                            onChange={(e) => setFormData({
-                              ...formData,
-                              personal_info: { ...formData.personal_info, linkedin: e.target.value }
-                            })}
-                            className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-xs md:text-sm focus:outline-none focus:border-violet-500"
-                            placeholder="linkedin.com/in/username"
-                          />
-                        </div>
-                        <div className="sm:col-span-2">
-                          <label className="block text-xs font-medium text-slate-700 mb-1">GitHub Profile (Optional)</label>
-                          <input
-                            type="text"
-                            value={formData.personal_info.github || ''}
-                            onChange={(e) => setFormData({
-                              ...formData,
-                              personal_info: { ...formData.personal_info, github: e.target.value }
-                            })}
-                            className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-xs md:text-sm focus:outline-none focus:border-violet-500"
-                            placeholder="github.com/username"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {activeEditSection === 'education' && (
-                    <div className="space-y-6">
-                      <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                        <h4 className="text-sm font-bold text-slate-900">Education Credentials</h4>
-                        <button
-                          type="button"
-                          onClick={() => setFormData({
-                            ...formData,
-                            education: [
-                              ...(formData.education || []),
-                              { degree: '', institution: '', duration: '', grade: '' }
-                            ]
-                          })}
-                          className="flex items-center gap-1 px-3 py-1.5 bg-violet-50 text-violet-700 rounded-xl text-xs font-semibold hover:bg-violet-100 transition-colors"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                          Add Education
-                        </button>
-                      </div>
-
-                      {formData.education?.map((edu, idx) => (
-                        <div key={idx} className="p-4 bg-slate-50 border border-slate-200/80 rounded-2xl relative space-y-3">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const updated = [...formData.education];
-                              updated.splice(idx, 1);
-                              setFormData({ ...formData, education: updated });
-                            }}
-                            className="absolute top-3 right-3 p-1 text-slate-400 hover:text-red-500 transition-colors"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            <div>
-                              <label className="block text-[11px] font-medium text-slate-600 mb-1">Degree / Qualification</label>
-                              <input
-                                type="text"
-                                value={edu.degree || ''}
-                                onChange={(e) => {
-                                  const updated = [...formData.education];
-                                  updated[idx].degree = e.target.value;
-                                  setFormData({ ...formData, education: updated });
-                                }}
-                                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-medium text-slate-600 mb-1">Institution</label>
-                              <input
-                                type="text"
-                                value={edu.institution || ''}
-                                onChange={(e) => {
-                                  const updated = [...formData.education];
-                                  updated[idx].institution = e.target.value;
-                                  setFormData({ ...formData, education: updated });
-                                }}
-                                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-medium text-slate-600 mb-1">Duration</label>
-                              <input
-                                type="text"
-                                value={edu.duration || ''}
-                                onChange={(e) => {
-                                  const updated = [...formData.education];
-                                  updated[idx].duration = e.target.value;
-                                  setFormData({ ...formData, education: updated });
-                                }}
-                                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
-                                placeholder="Nov 2021 – Present"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-medium text-slate-600 mb-1">Grade / Honors (Optional)</label>
-                              <input
-                                type="text"
-                                value={edu.grade || ''}
-                                onChange={(e) => {
-                                  const updated = [...formData.education];
-                                  updated[idx].grade = e.target.value;
-                                  setFormData({ ...formData, education: updated });
-                                }}
-                                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
-                                placeholder="1st Class"
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {activeEditSection === 'experience' && (
-                    <div className="space-y-6">
-                      <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                        <h4 className="text-sm font-bold text-slate-900">Work Experience</h4>
-                        <button
-                          type="button"
-                          onClick={() => setFormData({
-                            ...formData,
-                            work_experience: [
-                              ...(formData.work_experience || []),
-                              { role: '', company: '', duration: '', achievements: [''] }
-                            ]
-                          })}
-                          className="flex items-center gap-1 px-3 py-1.5 bg-violet-50 text-violet-700 rounded-xl text-xs font-semibold hover:bg-violet-100 transition-colors"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                          Add Role
-                        </button>
-                      </div>
-
-                      {formData.work_experience?.map((exp, idx) => (
-                        <div key={idx} className="p-4 bg-slate-50 border border-slate-200/80 rounded-2xl relative space-y-3">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const updated = [...formData.work_experience];
-                              updated.splice(idx, 1);
-                              setFormData({ ...formData, work_experience: updated });
-                            }}
-                            className="absolute top-3 right-3 p-1 text-slate-400 hover:text-red-500 transition-colors"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            <div>
-                              <label className="block text-[11px] font-medium text-slate-600 mb-1">Job Title / Role</label>
-                              <input
-                                type="text"
-                                value={exp.role || ''}
-                                onChange={(e) => {
-                                  const updated = [...formData.work_experience];
-                                  updated[idx].role = e.target.value;
-                                  setFormData({ ...formData, work_experience: updated });
-                                }}
-                                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-medium text-slate-600 mb-1">Company Name</label>
-                              <input
-                                type="text"
-                                value={exp.company || ''}
-                                onChange={(e) => {
-                                  const updated = [...formData.work_experience];
-                                  updated[idx].company = e.target.value;
-                                  setFormData({ ...formData, work_experience: updated });
-                                }}
-                                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-medium text-slate-600 mb-1">Duration</label>
-                              <input
-                                type="text"
-                                value={exp.duration || ''}
-                                onChange={(e) => {
-                                  const updated = [...formData.work_experience];
-                                  updated[idx].duration = e.target.value;
-                                  setFormData({ ...formData, work_experience: updated });
-                                }}
-                                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
-                              />
-                            </div>
-                          </div>
-
-                          <div>
-                            <label className="block text-[11px] font-medium text-slate-600 mb-1">Achievements & Impact Bullet Points</label>
-                            {exp.achievements?.map((ach, aIdx) => (
-                              <div key={aIdx} className="flex items-center gap-2 mb-2">
-                                <input
-                                  type="text"
-                                  value={ach}
-                                  onChange={(e) => {
-                                    const updated = [...formData.work_experience];
-                                    updated[idx].achievements[aIdx] = e.target.value;
-                                    setFormData({ ...formData, work_experience: updated });
-                                  }}
-                                  className="flex-1 px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const updated = [...formData.work_experience];
-                                    updated[idx].achievements.splice(aIdx, 1);
-                                    setFormData({ ...formData, work_experience: updated });
-                                  }}
-                                  className="p-1 text-slate-400 hover:text-red-500"
-                                >
-                                  <X className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            ))}
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const updated = [...formData.work_experience];
-                                updated[idx].achievements.push('');
-                                setFormData({ ...formData, work_experience: updated });
-                              }}
-                              className="text-[11px] font-semibold text-violet-600 hover:underline flex items-center gap-1"
-                            >
-                              <Plus className="w-3 h-3" /> Add Achievement Bullet
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {activeEditSection === 'projects' && (
-                    <div className="space-y-6">
-                      <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                        <h4 className="text-sm font-bold text-slate-900">Key Projects</h4>
-                        <button
-                          type="button"
-                          onClick={() => setFormData({
-                            ...formData,
-                            key_projects: [
-                              ...(formData.key_projects || []),
-                              { title: '', link: '', achievements: [''] }
-                            ]
-                          })}
-                          className="flex items-center gap-1 px-3 py-1.5 bg-violet-50 text-violet-700 rounded-xl text-xs font-semibold hover:bg-violet-100 transition-colors"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                          Add Project
-                        </button>
-                      </div>
-
-                      {formData.key_projects?.map((proj, idx) => (
-                        <div key={idx} className="p-4 bg-slate-50 border border-slate-200/80 rounded-2xl relative space-y-3">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const updated = [...formData.key_projects];
-                              updated.splice(idx, 1);
-                              setFormData({ ...formData, key_projects: updated });
-                            }}
-                            className="absolute top-3 right-3 p-1 text-slate-400 hover:text-red-500 transition-colors"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            <div>
-                              <label className="block text-[11px] font-medium text-slate-600 mb-1">Project Title</label>
-                              <input
-                                type="text"
-                                value={proj.title || ''}
-                                onChange={(e) => {
-                                  const updated = [...formData.key_projects];
-                                  updated[idx].title = e.target.value;
-                                  setFormData({ ...formData, key_projects: updated });
-                                }}
-                                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-medium text-slate-600 mb-1">Project Link (Optional)</label>
-                              <input
-                                type="text"
-                                value={proj.link || ''}
-                                onChange={(e) => {
-                                  const updated = [...formData.key_projects];
-                                  updated[idx].link = e.target.value;
-                                  setFormData({ ...formData, key_projects: updated });
-                                }}
-                                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
-                              />
-                            </div>
-                          </div>
-
-                          <div>
-                            <label className="block text-[11px] font-medium text-slate-600 mb-1">Key Contributions & Highlights</label>
-                            {proj.achievements?.map((ach, aIdx) => (
-                              <div key={aIdx} className="flex items-center gap-2 mb-2">
-                                <input
-                                  type="text"
-                                  value={ach}
-                                  onChange={(e) => {
-                                    const updated = [...formData.key_projects];
-                                    updated[idx].achievements[aIdx] = e.target.value;
-                                    setFormData({ ...formData, key_projects: updated });
-                                  }}
-                                  className="flex-1 px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const updated = [...formData.key_projects];
-                                    updated[idx].achievements.splice(aIdx, 1);
-                                    setFormData({ ...formData, key_projects: updated });
-                                  }}
-                                  className="p-1 text-slate-400 hover:text-red-500"
-                                >
-                                  <X className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            ))}
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const updated = [...formData.key_projects];
-                                updated[idx].achievements.push('');
-                                setFormData({ ...formData, key_projects: updated });
-                              }}
-                              className="text-[11px] font-semibold text-violet-600 hover:underline flex items-center gap-1"
-                            >
-                              <Plus className="w-3 h-3" /> Add Project Highlight
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {activeEditSection === 'skills' && (
-                    <div className="space-y-6">
-                      <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                        <h4 className="text-sm font-bold text-slate-900">Technical Skill Categories</h4>
-                        <button
-                          type="button"
-                          onClick={() => setFormData({
-                            ...formData,
-                            technical_skills: [
-                              ...(formData.technical_skills || []),
-                              { category_name: '', subcategories: [] }
-                            ]
-                          })}
-                          className="flex items-center gap-1 px-3 py-1.5 bg-violet-50 text-violet-700 rounded-xl text-xs font-semibold hover:bg-violet-100 transition-colors"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                          Add Category
-                        </button>
-                      </div>
-
-                      {formData.technical_skills?.map((cat, idx) => (
-                        <div key={idx} className="p-4 bg-slate-50 border border-slate-200/80 rounded-2xl relative space-y-3">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const updated = [...formData.technical_skills];
-                              updated.splice(idx, 1);
-                              setFormData({ ...formData, technical_skills: updated });
-                            }}
-                            className="absolute top-3 right-3 p-1 text-slate-400 hover:text-red-500 transition-colors"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-
-                          <div>
-                            <label className="block text-[11px] font-medium text-slate-600 mb-1">Category Title</label>
-                            <input
-                              type="text"
-                              value={cat.category_name || ''}
-                              onChange={(e) => {
-                                const updated = [...formData.technical_skills];
-                                updated[idx].category_name = e.target.value;
-                                setFormData({ ...formData, technical_skills: updated });
-                              }}
-                              className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-medium"
-                              placeholder="e.g. Languages or Backend"
-                            />
-                          </div>
-
-                          <div>
-                            <label className="block text-[11px] font-medium text-slate-600 mb-1">Skills (Comma-Separated)</label>
-                            <input
-                              type="text"
-                              value={cat.subcategories?.join(', ') || ''}
-                              onChange={(e) => {
-                                const updated = [...formData.technical_skills];
-                                updated[idx].subcategories = e.target.value.split(',').map(s => s.trimStart());
-                                setFormData({ ...formData, technical_skills: updated });
-                              }}
-                              className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
-                              placeholder="Python, TypeScript, Node.js"
-                            />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="px-6 py-4 border-t border-slate-100 flex items-center justify-between bg-white shrink-0">
-                <span className="text-xs text-slate-400">All adjustments update your live PDF automatically.</span>
-                <div className="flex gap-3">
-                  <button onClick={() => setIsEditModalOpen(false)} className="px-4 py-2 text-xs md:text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-xl transition-colors">
-                    Cancel
-                  </button>
-                  <button onClick={handleSaveStructuredEdit} className="px-5 py-2 text-xs md:text-sm font-semibold bg-violet-600 text-white hover:bg-violet-700 rounded-xl shadow-md shadow-violet-200 transition-colors">
-                    Save & Re-Render PDF
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+        {/* ================= FLOATING RIGHT SIDEBAR (DESKTOP DOCK) ================= */}
+        <motion.aside
+          initial={{ opacity: 0, x: 30 }}
+          animate={hasEntered ? { opacity: 1, x: 0 } : {}}
+          transition={{ duration: 0.8, delay: 0.3 }}
+          className="fixed right-5 md:right-8 top-1/2 -translate-y-1/2 z-30 hidden sm:flex flex-col items-center gap-6 p-3.5 rounded-full bg-black/40 backdrop-blur-2xl border border-white/20 shadow-[0_10px_30px_rgba(0,0,0,0.6)]"
+        >
+          <button
+            onMouseEnter={triggerAudioFeedback}
+            aria-label="Home"
+            className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <Home className="w-5 h-5 stroke-[1.5]" />
+          </button>
+          <button
+            onMouseEnter={triggerAudioFeedback}
+            aria-label="Documents"
+            className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <FileText className="w-5 h-5 stroke-[1.5]" />
+          </button>
+          <button
+            onMouseEnter={triggerAudioFeedback}
+            aria-label="Voice Active"
+            className="relative p-2.5 rounded-full text-white bg-purple-500/30 shadow-[0_0_15px_rgba(192,132,252,0.4)] border border-purple-400/40"
+          >
+            <Mic className="w-5 h-5 stroke-[1.75] text-purple-200" />
+          </button>
+          <button
+            onMouseEnter={triggerAudioFeedback}
+            aria-label="AI Features"
+            className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <Sparkles className="w-5 h-5 stroke-[1.5]" />
+          </button>
+          <button
+            onMouseEnter={triggerAudioFeedback}
+            aria-label="Settings"
+            className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <Settings className="w-5 h-5 stroke-[1.5]" />
+          </button>
+        </motion.aside>
+      </div>
     </div>
   );
 }

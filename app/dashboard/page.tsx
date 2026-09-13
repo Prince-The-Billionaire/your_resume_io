@@ -18,6 +18,7 @@ import {
   VolumeX,
   Menu,
   X,
+  Loader2,
 } from 'lucide-react';
 
 const cormorant = Cormorant_Garamond({
@@ -50,13 +51,17 @@ const INTERVIEW_STEP_URL =
   process.env.NEXT_PUBLIC_INTERVIEW_STEP_URL ||
   'https://danielprincewill14--ats-resume-desktop-backend-interview-6a8fe2.modal.run';
 
+const TRANSCRIBE_URL =
+  process.env.NEXT_PUBLIC_TRANSCRIBE_URL ||
+  'https://danielprincewill14--ats-resume-desktop-backend-transcrib-832ec1.modal.run ';
+
 const RENDER_PDF_URL =
   process.env.NEXT_PUBLIC_RENDER_PDF_URL ||
   'https://danielprincewill14--ats-resume-desktop-backend-render-pd-948bdd.modal.run';
 
 const requestJson = async (url: string, options: RequestInit = {}) => {
   if (!url) {
-    throw new Error('Backend URL is not configured. Add NEXT_PUBLIC_INTERVIEW_STEP_URL and NEXT_PUBLIC_RENDER_PDF_URL to your environment.');
+    throw new Error('Backend URL is not configured. Add environment variables to your configuration.');
   }
 
   const controller = new AbortController();
@@ -87,7 +92,7 @@ const requestJson = async (url: string, options: RequestInit = {}) => {
 
     if (error instanceof TypeError) {
       throw new Error(
-        'Failed to reach the interview backend. Check the Modal URL, CORS settings, or add the correct NEXT_PUBLIC_* environment variables.'
+        'Failed to reach the backend. Check the Modal URL, CORS settings, or environment variables.'
       );
     }
 
@@ -157,6 +162,7 @@ export default function App() {
 
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [pdfBase64, setPdfBase64] = useState<string | null>(null);
 
   // Recording & Waveform State
@@ -181,8 +187,6 @@ export default function App() {
     resume_data: {},
     transcript: [],
   });
-
-  const requiresTyping = ['CONTACT_INFO', 'PROJECTS_GITHUB'].includes(interviewState.current_step);
 
   // Parallax Setup
   const mouseX = useMotionValue(0);
@@ -267,7 +271,7 @@ export default function App() {
         stream.getTracks().forEach((track) => track.stop());
 
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        await sendAudioPayload(audioBlob);
+        await sendAudioForTranscription(audioBlob);
       };
 
       mediaRecorder.start();
@@ -291,15 +295,28 @@ export default function App() {
     setIsRecording(false);
   };
 
-  const sendAudioPayload = async (audioBlob: Blob) => {
-    setIsLoading(true);
+  // Convert audio blob to text via /transcribe endpoint and write to text box for user editing
+  const sendAudioForTranscription = async (audioBlob: Blob) => {
+    setIsTranscribing(true);
 
-    // Convert Blob to Base64 payload
     const reader = new FileReader();
     reader.readAsDataURL(audioBlob);
     reader.onloadend = async () => {
-      const base64Audio = (reader.result as string).split(',')[1];
-      await executeInterviewStep({ audio_base64: base64Audio, mime_type: 'audio/webm' });
+      try {
+        const base64Audio = (reader.result as string).split(',')[1];
+        const data = await requestJson(TRANSCRIBE_URL, {
+          method: 'POST',
+          body: JSON.stringify({ audio_base64: base64Audio, mime_type: 'audio/webm' }),
+        });
+
+        if (data.transcript) {
+          setInputValue((prev) => (prev ? `${prev} ${data.transcript}` : data.transcript));
+        }
+      } catch (err: any) {
+        console.error('Transcription error:', err);
+      } finally {
+        setIsTranscribing(false);
+      }
     };
   };
 
@@ -316,7 +333,7 @@ export default function App() {
     await executeInterviewStep({ user_input: textToSend });
   };
 
-  const executeInterviewStep = async (payload: { user_input?: string; audio_base64?: string; mime_type?: string }) => {
+  const executeInterviewStep = async (payload: { user_input: string }) => {
     try {
       const data = await requestJson(INTERVIEW_STEP_URL, {
         method: 'POST',
@@ -325,14 +342,6 @@ export default function App() {
           ...payload,
         }),
       });
-
-      // Transcribed Speech append
-      if (data.user_transcription) {
-        setMessages((prev) => [
-          ...prev,
-          { id: Date.now().toString() + '-user', role: 'user', content: data.user_transcription },
-        ]);
-      }
 
       setInterviewState(data.state);
       setMessages((prev) => [
@@ -410,14 +419,14 @@ export default function App() {
               transition={{ duration: 0.8 }}
               className="flex flex-col items-center gap-6 text-center max-w-sm"
             >
-              <div className="p-4 rounded-full bg-white/[0.03] border border-white/10 shadow-[0_0_30px_rgba(255,255,255,0.05)]">
-                <Volume2 className="w-6 h-6 text-slate-300 stroke-[1.5]" />
+              <div className="p-4 rounded-full bg-white/[0.05] border border-white/20 shadow-[0_0_30px_rgba(255,255,255,0.08)]">
+                <Volume2 className="w-6 h-6 text-slate-100 stroke-[1.5]" />
               </div>
               <div>
                 <h3 className={`${cormorant.className} text-3xl font-normal text-slate-100 tracking-wide`}>
                   YourResume.io
                 </h3>
-                <p className="text-xs text-slate-400 mt-2 tracking-widest uppercase">
+                <p className="text-xs text-slate-200 mt-2 tracking-widest uppercase font-medium">
                   Continuous Lo-Fi Focus Sound Active
                 </p>
               </div>
@@ -461,7 +470,7 @@ export default function App() {
             {/* Sound Mute Toggle */}
             <button
               onClick={toggleMute}
-              className="p-3 rounded-full bg-black/30 border border-white/10 backdrop-blur-xl hover:bg-white/10 transition-colors text-slate-300"
+              className="p-3 rounded-full bg-black/40 border border-white/20 backdrop-blur-xl hover:bg-white/10 transition-colors text-slate-200"
             >
               {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
             </button>
@@ -470,7 +479,7 @@ export default function App() {
             <div className="relative sm:hidden">
               <button
                 onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-                className="p-3 rounded-full bg-black/40 border border-white/15 backdrop-blur-2xl text-slate-200 hover:bg-white/10 transition-all"
+                className="p-3 rounded-full bg-black/60 border border-white/25 backdrop-blur-2xl text-slate-100 hover:bg-white/10 transition-all"
               >
                 {isMobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
               </button>
@@ -483,21 +492,21 @@ export default function App() {
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.85, y: -10 }}
                     onMouseLeave={() => setIsMobileMenuOpen(false)}
-                    className="absolute right-0 top-14 z-40 flex items-center gap-4 p-3 rounded-full bg-black/60 backdrop-blur-3xl border border-white/20 shadow-[0_10px_30px_rgba(0,0,0,0.8)]"
+                    className="absolute right-0 top-14 z-40 flex items-center gap-4 p-3 rounded-full bg-black/80 backdrop-blur-3xl border border-white/30 shadow-[0_10px_30px_rgba(0,0,0,0.9)]"
                   >
-                    <button className="p-2.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10">
+                    <button className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10">
                       <Home className="w-4 h-4" />
                     </button>
-                    <button className="p-2.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10">
+                    <button className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10">
                       <FileText className="w-4 h-4" />
                     </button>
-                    <button className="p-2.5 rounded-full text-white bg-purple-500/20 border border-purple-400/40">
-                      <Mic className="w-4 h-4 text-purple-200" />
+                    <button className="p-2.5 rounded-full text-white bg-purple-500/30 border border-purple-400/50">
+                      <Mic className="w-4 h-4 text-purple-100" />
                     </button>
-                    <button className="p-2.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10">
+                    <button className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10">
                       <Sparkles className="w-4 h-4" />
                     </button>
-                    <button className="p-2.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10">
+                    <button className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10">
                       <Settings className="w-4 h-4" />
                     </button>
                   </motion.nav>
@@ -519,23 +528,23 @@ export default function App() {
             }`}
           >
             <div className="p-1 sm:p-1.5 rounded-[32px] border border-white/20 bg-white/[0.02] backdrop-blur-3xl shadow-[0_20px_50px_rgba(0,0,0,0.6)]">
-              <div className="relative rounded-[28px] border border-white/30 bg-black/30 backdrop-blur-2xl overflow-hidden flex flex-col h-[520px] md:h-[580px] shadow-inner">
+              <div className="relative rounded-[28px] border border-white/30 bg-black/40 backdrop-blur-2xl overflow-hidden flex flex-col h-[520px] md:h-[580px] shadow-inner">
                 
                 {/* Header */}
-                <div className="px-6 md:px-8 py-5 border-b border-white/10 bg-white/[0.02] flex items-center justify-between">
+                <div className="px-6 md:px-8 py-5 border-b border-white/15 bg-white/[0.04] flex items-center justify-between">
                   <div>
                     <h2 className={`${cormorant.className} text-3xl sm:text-4xl font-normal text-slate-100 tracking-wide`}>
                       Interview Session
                     </h2>
                     <div className="flex items-center gap-2 mt-1">
                       <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
-                      <span className="text-[11px] font-medium text-slate-300 tracking-widest uppercase">
+                      <span className="text-[11px] font-semibold text-slate-200 tracking-widest uppercase">
                         AI Agent Active
                       </span>
                     </div>
                   </div>
 
-                  <div className="px-4 py-1.5 rounded-full bg-white/[0.06] border border-white/20 backdrop-blur-md text-xs font-light text-slate-200 tracking-wider">
+                  <div className="px-4 py-1.5 rounded-full bg-white/10 border border-white/25 backdrop-blur-md text-xs font-medium text-slate-100 tracking-wider">
                     {interviewState.current_step.replace('_', ' ')}
                   </div>
                 </div>
@@ -553,18 +562,18 @@ export default function App() {
                         <div
                           className={`w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center border shadow-lg ${
                             msg.role === 'user'
-                              ? 'bg-purple-500/20 border-purple-400/40 text-purple-100'
-                              : 'bg-white/10 border-white/20 text-white'
+                              ? 'bg-purple-500/30 border-purple-400/50 text-purple-100'
+                              : 'bg-white/15 border-white/25 text-white'
                           }`}
                         >
                           {msg.role === 'user' ? <User className="w-4 h-4" /> : <Sparkles className="w-4 h-4 text-purple-200" />}
                         </div>
 
                         <div
-                          className={`max-w-[80%] text-sm sm:text-base font-light leading-relaxed p-4 px-5 rounded-2xl backdrop-blur-md ${
+                          className={`max-w-[80%] text-sm sm:text-base font-normal leading-relaxed p-4 px-5 rounded-2xl backdrop-blur-md ${
                             msg.role === 'user'
-                              ? 'bg-purple-900/30 text-slate-100 rounded-tr-none border border-purple-400/20'
-                              : 'bg-white/[0.06] text-slate-200 rounded-tl-none border border-white/10'
+                              ? 'bg-purple-900/50 text-slate-100 rounded-tr-none border border-purple-400/30'
+                              : 'bg-white/10 text-slate-100 rounded-tl-none border border-white/20'
                           }`}
                         >
                           {msg.content}
@@ -575,80 +584,86 @@ export default function App() {
 
                   {isLoading && (
                     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-4">
-                      <div className="w-9 h-9 rounded-full bg-white/10 border border-white/20 flex items-center justify-center">
+                      <div className="w-9 h-9 rounded-full bg-white/15 border border-white/25 flex items-center justify-center">
                         <Sparkles className="w-4 h-4 text-purple-200" />
                       </div>
-                      <div className="bg-white/[0.06] border border-white/10 rounded-2xl rounded-tl-none p-4 px-6 flex items-center gap-2">
-                        <motion.div className="w-1.5 h-1.5 bg-slate-300 rounded-full" animate={{ y: [0, -4, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0 }} />
-                        <motion.div className="w-1.5 h-1.5 bg-slate-300 rounded-full" animate={{ y: [0, -4, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0.2 }} />
-                        <motion.div className="w-1.5 h-1.5 bg-slate-300 rounded-full" animate={{ y: [0, -4, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0.4 }} />
+                      <div className="bg-white/10 border border-white/20 rounded-2xl rounded-tl-none p-4 px-6 flex items-center gap-2">
+                        <motion.div className="w-1.5 h-1.5 bg-slate-200 rounded-full" animate={{ y: [0, -4, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0 }} />
+                        <motion.div className="w-1.5 h-1.5 bg-slate-200 rounded-full" animate={{ y: [0, -4, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0.2 }} />
+                        <motion.div className="w-1.5 h-1.5 bg-slate-200 rounded-full" animate={{ y: [0, -4, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0.4 }} />
                       </div>
                     </motion.div>
                   )}
                   <div ref={messagesEndRef} />
                 </div>
 
-                {/* Bottom Interactive Dock */}
-                <div className="p-6 border-t border-white/10 bg-black/20 backdrop-blur-xl relative">
-                  {requiresTyping ? (
-                    <form onSubmit={handleSendTextMessage} className="flex flex-col gap-2">
-                      <div className="flex items-center text-[10px] uppercase font-medium text-slate-400 tracking-widest">
-                        <Keyboard className="w-3 h-3 mr-2 text-purple-300" /> Keyboard Input Required
-                      </div>
-                      <div className="flex items-center bg-white/[0.05] border border-white/20 rounded-full pl-5 pr-2 py-1.5">
+                {/* Bottom Interactive Input Dock */}
+                <div className="p-5 border-t border-white/15 bg-black/40 backdrop-blur-xl relative">
+                  <form onSubmit={handleSendTextMessage} className="flex flex-col gap-3">
+                    <div className="flex items-center justify-between text-[11px] uppercase font-semibold text-slate-200 tracking-wider">
+                      <span className="flex items-center">
+                        <Keyboard className="w-3.5 h-3.5 mr-2 text-purple-300" /> Response Text Box
+                      </span>
+                      {isTranscribing && (
+                        <span className="flex items-center text-purple-300 font-mono gap-1.5">
+                          <Loader2 className="w-3 h-3 animate-spin" /> Transcribing Audio...
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 flex items-center bg-black/50 border border-white/25 rounded-full pl-5 pr-2 py-1.5 focus-within:border-purple-400/60 transition-colors">
                         <input
                           type="text"
                           value={inputValue}
                           onChange={(e) => setInputValue(e.target.value)}
                           placeholder={
-                            interviewState.current_step === 'CONTACT_INFO'
-                              ? 'Type your email and phone number...'
-                              : 'Type your GitHub profile or repo link...'
+                            isTranscribing
+                              ? 'Converting audio to text...'
+                              : 'Type response or tap mic to record speech...'
                           }
-                          disabled={isLoading || !!pdfBase64}
-                          className="flex-1 bg-transparent text-sm text-white focus:outline-none placeholder:text-slate-400"
+                          disabled={isLoading || isTranscribing || !!pdfBase64}
+                          className="flex-1 bg-transparent text-sm text-white focus:outline-none placeholder:text-slate-300"
                         />
                         <button
                           type="submit"
-                          disabled={!inputValue.trim() || isLoading}
-                          className="p-3 rounded-full bg-white/10 text-white hover:bg-white/20 transition-all disabled:opacity-40"
+                          disabled={!inputValue.trim() || isLoading || isTranscribing}
+                          className="p-2.5 rounded-full bg-purple-600 text-white hover:bg-purple-500 transition-all disabled:opacity-30 disabled:hover:bg-purple-600"
                         >
                           <Send className="w-4 h-4" />
                         </button>
                       </div>
-                    </form>
-                  ) : (
-                    /* RECORDING / WAVEFORM CONTAINER */
-                    <div className="relative flex items-center justify-center min-h-[70px] w-full">
-                      <motion.div layout className="flex items-center justify-center">
-                        {/* Smooth Mic Button */}
+
+                      {/* Integrated Voice Mic Controls */}
+                      <div className="relative flex items-center justify-center flex-shrink-0">
                         <motion.div
                           layout
                           transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-                          className="p-1.5 rounded-full border border-white/20 bg-white/[0.02] backdrop-blur-md z-10"
+                          className="p-1 rounded-full border border-white/20 bg-white/[0.04] backdrop-blur-md z-10"
                         >
                           <button
+                            type="button"
                             onClick={isRecording ? stopRecording : startRecording}
-                            disabled={isLoading || !!pdfBase64}
+                            disabled={isLoading || isTranscribing || !!pdfBase64}
                             aria-label="Microphone Action"
-                            className={`relative flex items-center justify-center w-16 h-16 rounded-full border transition-colors duration-300 ${
+                            className={`relative flex items-center justify-center w-11 h-11 rounded-full border transition-colors duration-300 ${
                               isRecording
                                 ? isWarningTime
-                                  ? 'bg-red-600 border-red-400 text-white shadow-[0_0_35px_rgba(239,68,68,0.8)]'
-                                  : 'bg-purple-600 border-purple-300 text-white shadow-[0_0_30px_rgba(192,132,252,0.6)]'
+                                  ? 'bg-red-600 border-red-400 text-white shadow-[0_0_25px_rgba(239,68,68,0.8)]'
+                                  : 'bg-purple-600 border-purple-300 text-white shadow-[0_0_20px_rgba(192,132,252,0.6)]'
                                 : 'bg-white/10 border-white/30 text-white hover:border-purple-300/60 hover:scale-105'
                             }`}
                           >
                             {isRecording ? (
-                              <Square className="w-5 h-5 fill-current" />
+                              <Square className="w-4 h-4 fill-current" />
                             ) : (
-                              <Mic className="w-6 h-6 text-purple-200" />
+                              <Mic className="w-5 h-5 text-purple-200" />
                             )}
 
                             {/* Blinking Recording Indicator */}
                             {isRecording && (
                               <span
-                                className={`absolute top-2 right-2 w-3 h-3 rounded-full animate-ping ${
+                                className={`absolute top-1.5 right-1.5 w-2.5 h-2.5 rounded-full animate-ping ${
                                   isWarningTime ? 'bg-red-400' : 'bg-purple-300'
                                 }`}
                               />
@@ -660,36 +675,36 @@ export default function App() {
                         <AnimatePresence>
                           {isRecording && (
                             <motion.div
-                              initial={{ opacity: 0, width: 0, x: -20 }}
+                              initial={{ opacity: 0, width: 0, x: -10 }}
                               animate={{ opacity: 1, width: 'auto', x: 0 }}
-                              exit={{ opacity: 0, width: 0, x: -20 }}
+                              exit={{ opacity: 0, width: 0, x: -10 }}
                               transition={{ type: 'spring', stiffness: 280, damping: 24 }}
-                              className="overflow-hidden flex items-center"
+                              className="overflow-hidden flex items-center absolute right-14"
                             >
                               <div
-                                className={`ml-4 flex items-center gap-3 px-6 py-3.5 rounded-full border backdrop-blur-xl transition-colors duration-300 ${
+                                className={`flex items-center gap-2.5 px-4 py-2 rounded-full border backdrop-blur-xl transition-colors duration-300 ${
                                   isWarningTime
-                                    ? 'bg-red-950/40 border-red-500/40 shadow-[0_0_20px_rgba(239,68,68,0.2)]'
-                                    : 'bg-white/[0.06] border-white/15'
+                                    ? 'bg-red-950/80 border-red-500/50 shadow-[0_0_20px_rgba(239,68,68,0.4)]'
+                                    : 'bg-black/80 border-white/30'
                                 }`}
                               >
                                 {/* Timer Display */}
                                 <span
                                   className={`text-xs font-mono font-medium tracking-wider ${
-                                    isWarningTime ? 'text-red-300 animate-pulse' : 'text-slate-300'
+                                    isWarningTime ? 'text-red-300 animate-pulse' : 'text-slate-100'
                                   }`}
                                 >
                                   {formatTime(recordingSeconds)}
                                 </span>
 
-                                <div className="h-4 w-[1px] bg-white/20" />
+                                <div className="h-4 w-[1px] bg-white/30" />
 
                                 {/* Frequency Audio Bars */}
-                                <div className="flex items-center gap-1.5 h-8">
+                                <div className="flex items-center gap-1 h-6">
                                   {audioLevels.map((lvl, idx) => (
                                     <motion.div
                                       key={idx}
-                                      animate={{ height: `${lvl}px` }}
+                                      animate={{ height: `${lvl * 0.6}px` }}
                                       transition={{ type: 'spring', stiffness: 300, damping: 20 }}
                                       className={`w-1 rounded-full ${
                                         isWarningTime ? 'bg-red-500' : 'bg-purple-300'
@@ -701,9 +716,9 @@ export default function App() {
                             </motion.div>
                           )}
                         </AnimatePresence>
-                      </motion.div>
+                      </div>
                     </div>
-                  )}
+                  </form>
                 </div>
               </div>
             </div>
@@ -746,40 +761,40 @@ export default function App() {
           initial={{ opacity: 0, x: 30 }}
           animate={hasEntered ? { opacity: 1, x: 0 } : {}}
           transition={{ duration: 0.8, delay: 0.3 }}
-          className="fixed right-5 md:right-8 top-1/2 -translate-y-1/2 z-30 hidden sm:flex flex-col items-center gap-6 p-3.5 rounded-full bg-black/20 backdrop-blur-2xl border border-white/15 shadow-[0_10px_30px_rgba(0,0,0,0.5)]"
+          className="fixed right-5 md:right-8 top-1/2 -translate-y-1/2 z-30 hidden sm:flex flex-col items-center gap-6 p-3.5 rounded-full bg-black/40 backdrop-blur-2xl border border-white/20 shadow-[0_10px_30px_rgba(0,0,0,0.6)]"
         >
           <button
             onMouseEnter={triggerAudioFeedback}
             aria-label="Home"
-            className="p-2.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+            className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
           >
             <Home className="w-5 h-5 stroke-[1.5]" />
           </button>
           <button
             onMouseEnter={triggerAudioFeedback}
             aria-label="Documents"
-            className="p-2.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+            className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
           >
             <FileText className="w-5 h-5 stroke-[1.5]" />
           </button>
           <button
             onMouseEnter={triggerAudioFeedback}
             aria-label="Voice Active"
-            className="relative p-2.5 rounded-full text-white bg-white/10 shadow-[0_0_15px_rgba(192,132,252,0.4)] border border-purple-400/30"
+            className="relative p-2.5 rounded-full text-white bg-purple-500/30 shadow-[0_0_15px_rgba(192,132,252,0.4)] border border-purple-400/40"
           >
             <Mic className="w-5 h-5 stroke-[1.75] text-purple-200" />
           </button>
           <button
             onMouseEnter={triggerAudioFeedback}
             aria-label="AI Features"
-            className="p-2.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+            className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
           >
             <Sparkles className="w-5 h-5 stroke-[1.5]" />
           </button>
           <button
             onMouseEnter={triggerAudioFeedback}
             aria-label="Settings"
-            className="p-2.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+            className="p-2.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
           >
             <Settings className="w-5 h-5 stroke-[1.5]" />
           </button>
