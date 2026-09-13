@@ -46,6 +46,57 @@ declare global {
   }
 }
 
+const INTERVIEW_STEP_URL =
+  process.env.NEXT_PUBLIC_INTERVIEW_STEP_URL ||
+  'https://danielprincewill14--ats-resume-desktop-backend-interview-6a8fe2.modal.run';
+
+const RENDER_PDF_URL =
+  process.env.NEXT_PUBLIC_RENDER_PDF_URL ||
+  'https://danielprincewill14--ats-resume-desktop-backend-render-pd-948bdd.modal.run';
+
+const requestJson = async (url: string, options: RequestInit = {}) => {
+  if (!url) {
+    throw new Error('Backend URL is not configured. Add NEXT_PUBLIC_INTERVIEW_STEP_URL and NEXT_PUBLIC_RENDER_PDF_URL to your environment.');
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers || {}),
+      },
+    });
+
+    const text = await response.text();
+    const payload = text ? JSON.parse(text) : {};
+
+    if (!response.ok) {
+      throw new Error(payload?.detail || payload?.error || `Request failed with status ${response.status}`);
+    }
+
+    return payload;
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw new Error('The backend request timed out. Please check the Modal endpoint and network access.');
+    }
+
+    if (error instanceof TypeError) {
+      throw new Error(
+        'Failed to reach the interview backend. Check the Modal URL, CORS settings, or add the correct NEXT_PUBLIC_* environment variables.'
+      );
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 // --- Audio Feedback Synth ---
 const playTuningForkSound = (audioCtx: AudioContext | null) => {
   if (!audioCtx) return;
@@ -70,7 +121,7 @@ const playTuningForkSound = (audioCtx: AudioContext | null) => {
 const startBetterLoFiFocus = () => {
   const audio = new Audio('/Marble_and_Glass.mp3');
   audio.loop = true;
-  audio.volume = 0.15;
+  audio.volume = 0.04;
   audio.preload = 'auto';
 
   return {
@@ -267,21 +318,13 @@ export default function App() {
 
   const executeInterviewStep = async (payload: { user_input?: string; audio_base64?: string; mime_type?: string }) => {
     try {
-      const res = await fetch('https://danielprincewill14--ats-resume-desktop-backend-interview-step-endpoint.modal.run', {
+      const data = await requestJson(INTERVIEW_STEP_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           state: interviewState,
           ...payload,
         }),
       });
-
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.detail || 'Backend processing error');
-      }
-
-      const data = await res.json();
 
       // Transcribed Speech append
       if (data.user_transcription) {
@@ -318,14 +361,10 @@ export default function App() {
         { id: 'rendering-msg', role: 'ai', content: 'Drafting your perfectly formatted Harvard resume...' },
       ]);
 
-      const res = await fetch('https://danielprincewill14--ats-resume-desktop-backend-render-pdf-endpoint.modal.run', {
+      const data = await requestJson(RENDER_PDF_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ structured_json: structuredJson }),
       });
-
-      if (!res.ok) throw new Error('Failed to render PDF');
-      const data = await res.json();
       setPdfBase64(data.pdf_base64);
 
       setMessages((prev) => [
